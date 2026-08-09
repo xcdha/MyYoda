@@ -1,0 +1,228 @@
+# GitHub Actions: 自动打包分发
+#
+# 触发条件：推送 v* tag（如 v0.4.0）
+# 构建 macOS 和 Windows 产物并发布到 GitHub Releases
+#
+# 所需 GitHub Secrets（macOS 签名/公证，可选）:
+# - MAC_CERTS: Base64 编码的 macOS Developer ID Application 证书 (.p12)
+# - MAC_CERTS_PASSWORD: 证书密码
+# - APPLE_ID: Apple ID（公证用）
+# - APPLE_APP_SPECIFIC_PASSWORD: App-Specific 密码（公证用）
+# - APPLE_TEAM_ID: Apple Developer Team ID
+# GITHUB_TOKEN 由 GitHub Actions 自动提供，无需手动配置
+
+name: Release
+
+# run 标题统一为「chore: bump version to vX.Y.Z」，push tag 或手动补跑时都显示目标版本
+run-name: "chore: bump version to ${{ github.event_name == 'workflow_dispatch' && (inputs.tag || github.ref_name) || github.ref_name }}"
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建的 tag（默认使用最新推送的 v* tag；tag 推送偶发不触发时手动补跑）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  validate-release-version:
+    name: validate release version
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          # workflow_dispatch 时检出入参指定的 tag；push 触发时自动检出 tag
+          ref: ${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.ref }}
+
+      - name: 校验 tag 与应用版本一致
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            # workflow_dispatch 手动补跑：以输入 tag 为准（注意需在触发前确认该 tag 已推送）
+            tag="${{ github.event.inputs.tag }}"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "发布 tag 必须是 vX.Y.Z 格式，实际为：$tag" >&2
+            exit 1
+          fi
+
+          app_version="$(node -p "require('./apps/electron/package.json').version")"
+          if [[ "${tag#v}" != "$app_version" ]]; then
+            echo "发布 tag 与 apps/electron/package.json 版本不一致：tag=$tag，app=$app_version" >&2
+            exit 1
+          fi
+
+          echo "发布版本校验通过：$tag"
+
+      - name: 校验应用内本地化 release note 已归档
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            tag="${{ github.event.inputs.tag }}"
+          fi
+          version="${tag#v}"
+          bundled="apps/electron/resources/release-notes/${version}.md"
+          if [[ ! -f "$bundled" ]]; then
+            echo "缺少应用内版本历史文件：$bundled" >&2
+            echo "侧边栏「?」和 设置→关于/更新→版本历史 都读这个目录，发版前需要先补上（可用 bun run release-notes ${version} <content-file> 生成）。" >&2
+            exit 1
+          fi
+          echo "应用内 release note 校验通过：$bundled"
+
+      # 预创建 GitHub Release 并写入发布说明；后续各平台 job 的 electron-builder
+      # --publish always 会复用该 Release 并上传各自产物（多平台并行上传自动合并）。
+      - name: 创建/复用 GitHub Release（含发布说明）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # workflow_dispatch 时 GITHUB_REF_NAME 是分支名（main），必须用解析后的目标 tag
+          tag="${GITHUB_REF_NAME}"
+          if [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            tag="${{ github.event.inputs.tag }}"
+          fi
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "Release ${tag} 已存在，跳过创建"
+          else
+            gh release create "${tag}" \
+              --title "MyYoda ${tag}" \
+              --notes-file apps/electron/RELEASE_NOTES.md
+            echo "已创建 Release ${tag}"
+          fi
+
+  build-mac-arm64:
+    name: build (macos-latest, mac, arm64, --arm64)
+    runs-on: macos-latest
+    needs: validate-release-version
+    env:
+      MAC_CERTS: ${{ secrets.MAC_CERTS }}
+      MAC_CERTS_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # 锁定版本 + 传 token 走认证下载，规避 runner 下载 Bun zip 偶发 read ECONNRESET 连接重置。
+          bun-version: 1.3.14
+          token: ${{ github.token }}
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装依赖
+        run: bun install --frozen-lockfile
+
+      # 有签名证书时导入；无证书（内部构建）时跳过，产出未签名包
+      - name: 导入 macOS 签名证书
+        if: env.MAC_CERTS != ''
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$MAC_CERTS" | base64 --decode > $RUNNER_TEMP/cert.p12
+          security import $RUNNER_TEMP/cert.p12 -P "$MAC_CERTS_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          rm $RUNNER_TEMP/cert.p12
+
+      - name: 构建 Electron 应用
+        run: bun run electron:build
+        working-directory: .
+
+      - name: 打包并发布 (macOS arm64)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ env.MAC_CERTS != '' }}
+        run: |
+          for i in 1 2 3; do
+            npx electron-builder --mac --arm64 --publish always && break
+            echo "Attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+        working-directory: apps/electron
+
+  build-linux:
+    name: build (ubuntu-latest, linux, x64)
+    runs-on: ubuntu-latest
+    needs: validate-release-version
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+          token: ${{ github.token }}
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装依赖
+        run: bun install --frozen-lockfile
+
+      - name: 构建 Electron 应用
+        run: bun run electron:build
+        working-directory: .
+
+      - name: 打包并发布 (Linux/Ubuntu)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --linux --x64 --publish always
+        working-directory: apps/electron
+
+  build-windows-x64:
+    name: build (windows-latest, win, x64, --x64)
+    runs-on: windows-latest
+    needs: validate-release-version
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+          token: ${{ github.token }}
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装依赖
+        run: bun install --frozen-lockfile
+
+      # 构建应用
+      - name: 构建 Electron 应用
+        run: bun run electron:build
+        working-directory: .
+
+      - name: 打包并发布 (Windows)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --x64 --publish always
+        working-directory: apps/electron

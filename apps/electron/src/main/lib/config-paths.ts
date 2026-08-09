@@ -1,0 +1,902 @@
+/**
+ * 配置路径工具
+ *
+ * 管理 MyYoda 应用的本地配置文件路径。
+ * 所有用户配置存储在 ~/.myyoda/ 目录下。
+ */
+
+import { join, basename } from 'node:path'
+import { mkdirSync, existsSync, cpSync, rmSync, readdirSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { createRequire } from 'node:module'
+import { rmSyncWithRetry } from './fs-retry'
+
+/**
+ * 获取配置目录名称
+ *
+ * 开发模式下返回 '.myyoda-dev'，正式版本返回 '.myyoda'。
+ *
+ * 检测优先级：
+ * 1. MYYODA_DEV=1 环境变量（显式覆盖）
+ * 2. Electron app.isPackaged（未打包 = 开发模式）
+ * 3. 兜底 '.myyoda'
+ */
+let _configDirName: string | undefined
+
+export function getConfigDirName(): string {
+  if (_configDirName === undefined) {
+    if (process.env.MYYODA_DEV === '1') {
+      _configDirName = '.myyoda-dev'
+    } else {
+      try {
+        const { app } = require('electron')
+        _configDirName = app.isPackaged ? '.myyoda' : '.myyoda-dev'
+      } catch {
+        _configDirName = '.myyoda'
+      }
+    }
+    const mode = _configDirName === '.myyoda-dev' ? '开发模式' : '正式版本'
+    console.log(`[配置] 配置目录: ~/${_configDirName}/（${mode}）`)
+  }
+  return _configDirName
+}
+
+/**
+ * 获取配置目录路径
+ *
+ * 开发模式返回 ~/.myyoda-dev/，正式版本返回 ~/.myyoda/。
+ * 如果目录不存在则自动创建。
+ */
+export function getConfigDir(): string {
+  const configDir = join(homedir(), getConfigDirName())
+
+  if (!existsSync(configDir)) {
+    mkdirSync(configDir, { recursive: true })
+    console.log(`[配置] 已创建配置目录: ${configDir}`)
+  }
+
+  return configDir
+}
+
+/**
+ * 获取渠道配置文件路径
+ *
+ * @returns ~/.myyoda/channels.json
+ */
+export function getChannelsPath(): string {
+  return join(getConfigDir(), 'channels.json')
+}
+
+/**
+ * 获取对话索引文件路径
+ *
+ * @returns ~/.myyoda/conversations.json
+ */
+export function getConversationsIndexPath(): string {
+  return join(getConfigDir(), 'conversations.json')
+}
+
+/**
+ * 获取对话消息目录路径
+ *
+ * 如果目录不存在则自动创建。
+ *
+ * @returns ~/.myyoda/conversations/
+ */
+export function getConversationsDir(): string {
+  const dir = join(getConfigDir(), 'conversations')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+    console.log(`[配置] 已创建对话目录: ${dir}`)
+  }
+
+  return dir
+}
+
+/**
+ * 获取指定对话的消息文件路径
+ *
+ * @param id 对话 ID
+ * @returns ~/.myyoda/conversations/{id}.jsonl
+ */
+export function getConversationMessagesPath(id: string): string {
+  return join(getConversationsDir(), `${id}.jsonl`)
+}
+
+/**
+ * 获取附件存储根目录
+ *
+ * 如果目录不存在则自动创建。
+ *
+ * @returns ~/.myyoda/attachments/
+ */
+export function getAttachmentsDir(): string {
+  const dir = join(getConfigDir(), 'attachments')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+    console.log(`[配置] 已创建附件目录: ${dir}`)
+  }
+
+  return dir
+}
+
+/**
+ * 获取指定对话的附件目录
+ *
+ * 如果目录不存在则自动创建。
+ *
+ * @param conversationId 对话 ID
+ * @returns ~/.myyoda/attachments/{conversationId}/
+ */
+export function getConversationAttachmentsDir(conversationId: string): string {
+  const dir = join(getAttachmentsDir(), conversationId)
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+
+  return dir
+}
+
+/**
+ * 解析附件相对路径为完整路径
+ *
+ * @param localPath 相对路径 {conversationId}/{uuid}.ext
+ * @returns 完整路径 ~/.myyoda/attachments/{conversationId}/{uuid}.ext
+ */
+export function resolveAttachmentPath(localPath: string): string {
+  return join(getAttachmentsDir(), localPath)
+}
+
+/**
+ * 获取应用设置文件路径
+ *
+ * @returns ~/.myyoda/settings.json
+ */
+export function getSettingsPath(): string {
+  return join(getConfigDir(), 'settings.json')
+}
+
+/**
+ * 获取系统默认 App 探测缓存路径
+ *
+ * @returns ~/.myyoda/default-apps.json
+ */
+export function getDefaultAppsCachePath(): string {
+  return join(getConfigDir(), 'default-apps.json')
+}
+
+/**
+ * 获取用户档案文件路径
+ *
+ * @returns ~/.myyoda/user-profile.json
+ */
+export function getUserProfilePath(): string {
+  return join(getConfigDir(), 'user-profile.json')
+}
+
+/**
+ * 获取代理配置文件路径
+ *
+ * @returns ~/.myyoda/proxy-settings.json
+ */
+export function getProxySettingsPath(): string {
+  return join(getConfigDir(), 'proxy-settings.json')
+}
+
+/**
+ * 获取系统提示词配置文件路径
+ *
+ * @returns ~/.myyoda/system-prompts.json
+ */
+export function getSystemPromptsPath(): string {
+  return join(getConfigDir(), 'system-prompts.json')
+}
+
+/**
+ * 获取 Chat 工具配置文件路径
+ *
+ * @returns ~/.myyoda/chat-tools.json
+ */
+export function getChatToolsConfigPath(): string {
+  return join(getConfigDir(), 'chat-tools.json')
+}
+
+/**
+ * 获取 Agent 会话索引文件路径
+ *
+ * @returns ~/.myyoda/agent-sessions.json
+ */
+export function getAgentSessionsIndexPath(): string {
+  return join(getConfigDir(), 'agent-sessions.json')
+}
+
+/**
+ * 获取 Agent 会话消息目录路径
+ *
+ * 如果目录不存在则自动创建。
+ *
+ * @returns ~/.myyoda/agent-sessions/
+ */
+export function getAgentSessionsDir(): string {
+  const dir = join(getConfigDir(), 'agent-sessions')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+    console.log(`[配置] 已创建 Agent 会话目录: ${dir}`)
+  }
+
+  return dir
+}
+
+/**
+ * 获取指定 Agent 会话的消息文件路径
+ *
+ * @param id 会话 ID
+ * @returns ~/.myyoda/agent-sessions/{id}.jsonl
+ */
+export function getAgentSessionMessagesPath(id: string): string {
+  return join(getAgentSessionsDir(), `${id}.jsonl`)
+}
+
+/**
+ * 获取 Agent 用量聚合缓存文件路径
+ *
+ * @returns ~/.myyoda/agent-usage-cache.json
+ */
+export function getAgentUsageCachePath(): string {
+  return join(getConfigDir(), 'agent-usage-cache.json')
+}
+
+/**
+ * 获取 Agent 工作区索引文件路径
+ *
+ * @returns ~/.myyoda/agent-workspaces.json
+ */
+export function getAgentWorkspacesIndexPath(): string {
+  return join(getConfigDir(), 'agent-workspaces.json')
+}
+
+/**
+ * 获取 Agent 工作区根目录路径
+ *
+ * 如果目录不存在则自动创建。
+ *
+ * @returns ~/.myyoda/agent-workspaces/
+ */
+export function getAgentWorkspacesDir(): string {
+  const dir = join(getConfigDir(), 'agent-workspaces')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+    console.log(`[配置] 已创建 Agent 工作区目录: ${dir}`)
+  }
+
+  return dir
+}
+
+/**
+ * 获取指定 Agent 工作区的目录路径
+ *
+ * 如果目录不存在则自动创建。
+ *
+ * @param slug 工作区 slug
+ * @returns ~/.myyoda/agent-workspaces/{slug}/
+ */
+export function getAgentWorkspacePath(slug: string): string {
+  const dir = join(getAgentWorkspacesDir(), slug)
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+    console.log(`[配置] 已创建 Agent 工作区: ${dir}`)
+  }
+
+  return dir
+}
+
+/**
+ * 获取指定工作区的 MCP 配置文件路径
+ *
+ * @param slug 工作区 slug
+ * @returns ~/.myyoda/agent-workspaces/{slug}/mcp.json
+ */
+export function getWorkspaceMcpPath(slug: string): string {
+  return join(getAgentWorkspacePath(slug), 'mcp.json')
+}
+
+/**
+ * 获取指定工作区的会话自定义分组存储文件路径
+ *
+ * @param slug 工作区 slug
+ * @returns ~/.myyoda/agent-workspaces/{slug}/session-groups.json
+ */
+export function getSessionGroupsPath(slug: string): string {
+  return join(getAgentWorkspacePath(slug), 'session-groups.json')
+}
+
+/**
+ * 获取指定工作区的 Skill 调用次数统计文件路径
+ *
+ * @param slug 工作区 slug
+ * @returns ~/.myyoda/agent-workspaces/{slug}/skill-usage.json
+ */
+export function getWorkspaceSkillUsagePath(slug: string): string {
+  return join(getAgentWorkspacePath(slug), 'skill-usage.json')
+}
+
+/**
+ * 获取指定工作区的 Skills 目录路径
+ *
+ * 如果目录不存在则自动创建。
+ *
+ * @param slug 工作区 slug
+ * @returns ~/.myyoda/agent-workspaces/{slug}/skills/
+ */
+export function getWorkspaceSkillsDir(slug: string): string {
+  const dir = join(getAgentWorkspacePath(slug), 'skills')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+
+  return dir
+}
+
+/**
+ * 获取工作区文件目录路径
+ *
+ * 工作区内所有会话可访问的文件存放于此。
+ * 如果目录不存在则自动创建。
+ *
+ * @param slug 工作区 slug
+ * @returns ~/.myyoda/agent-workspaces/{slug}/workspace-files/
+ */
+export function getWorkspaceFilesDir(slug: string): string {
+  const dir = join(getAgentWorkspacePath(slug), 'workspace-files')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+
+  return dir
+}
+
+/**
+ * 解析工作区文件目录路径（只读，不创建目录）
+ *
+ * 与 getWorkspaceFilesDir 的区别：不会触发 mkdir 副作用，
+ * 适用于 /now 等只读查询场景。
+ *
+ * @param slug 工作区 slug
+ * @returns ~/.myyoda/agent-workspaces/{slug}/workspace-files/
+ */
+export function resolveWorkspaceFilesDir(slug: string): string {
+  return join(getConfigDir(), 'agent-workspaces', slug, 'workspace-files')
+}
+
+/** 获取并创建 Workspace 级会话 Outbox。 */
+export function getAgentSessionOutboxPath(workspaceSlug: string, sessionId: string): string {
+  const dir = join(getWorkspaceFilesDir(workspaceSlug), 'Outbox', sessionId)
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** 解析 Workspace 级会话 Outbox 路径，不创建目录。 */
+export function resolveAgentSessionOutboxPath(workspaceSlug: string, sessionId: string): string {
+  return join(resolveWorkspaceFilesDir(workspaceSlug), 'Outbox', sessionId)
+}
+
+/**
+ * 解析 Agent 会话工作目录路径（只读，不创建目录）
+ *
+ * 与 getAgentSessionWorkspacePath 的区别：不会触发 mkdir 副作用，
+ * 适用于 /now 等只读查询场景。
+ *
+ * @param slug 工作区 slug
+ * @param sessionId 会话 ID
+ * @returns ~/.myyoda/agent-workspaces/{slug}/{sessionId}/
+ */
+export function resolveAgentSessionWorkspacePath(slug: string, sessionId: string): string {
+  return join(getConfigDir(), 'agent-workspaces', slug, sessionId)
+}
+
+/**
+ * 获取工作区不活跃 Skills 目录路径
+ *
+ * 禁用的 Skill 会被移动到此目录，Agent SDK 不会扫描该目录。
+ * 如果目录不存在则自动创建。
+ *
+ * @param slug 工作区 slug
+ * @returns ~/.myyoda/agent-workspaces/{slug}/skills-inactive/
+ */
+export function getInactiveSkillsDir(slug: string): string {
+  const dir = join(getAgentWorkspacePath(slug), 'skills-inactive')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+
+  return dir
+}
+
+/**
+ * 获取默认 Skills 模板目录路径
+ *
+ * 新建工作区时自动复制此目录的内容到工作区 skills/ 下。
+ *
+ * @returns ~/.myyoda/default-skills/
+ */
+export function getDefaultSkillsDir(): string {
+  const dir = join(getConfigDir(), 'default-skills')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+
+  return dir
+}
+
+/**
+ * 获取 Agent 专家模板目录（~/.myyoda/default-experts/templates/）
+ */
+export function getDefaultExpertTemplatesDir(): string {
+  return join(getConfigDir(), 'default-experts', 'templates')
+}
+
+/**
+ * 从 app bundle 同步内置专家模板到 ~/.myyoda/default-experts/templates/
+ *
+ * 打包模式从 process.resourcesPath/default-experts 复制，开发模式从源码 default-experts/。
+ * 模板文件很小且「缺失即写」即可：新模板随应用分发自动出现，已存在的不覆盖
+ * （与 seedBuiltinExperts 同模式；semver 版本契约暂不引入，模板仅是新建专家参考目录）。
+ */
+export function seedDefaultExpertTemplates(): void {
+  const { app } = require('electron')
+  const bundledDir = app.isPackaged
+    ? join(process.resourcesPath, 'default-experts')
+    : join(__dirname, '../default-experts')
+
+  if (!existsSync(bundledDir)) {
+    console.log('[配置] 未找到内置 default-experts 目录，跳过')
+    return
+  }
+
+  const userDir = getDefaultExpertTemplatesDir()
+  mkdirSync(userDir, { recursive: true })
+
+  const templatesDir = join(bundledDir, 'templates')
+  if (!existsSync(templatesDir)) return
+
+  try {
+    for (const entry of readdirSync(templatesDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      const target = join(userDir, entry.name)
+      if (existsSync(target)) continue
+      cpSync(join(templatesDir, entry.name), target)
+      console.log(`[配置] 已同步默认专家模板: ${entry.name}`)
+    }
+  } catch (err) {
+    console.warn('[配置] 同步默认专家模板失败，跳过:', err)
+  }
+}
+
+/**
+ * 获取 Agent 专家包根目录路径
+ *
+ * 内置与自定义专家包均存放于此目录下的 {id}/ 子目录。
+ * 如果目录不存在则自动创建。
+ *
+ * @returns ~/.myyoda/experts/
+ */
+export function getExpertsDir(): string {
+  const dir = join(getConfigDir(), 'experts')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+    console.log(`[配置] 已创建专家目录: ${dir}`)
+  }
+
+  return dir
+}
+
+/**
+ * 获取打包进 App 的 myyoda CLI 二进制路径。
+ *
+ * 打包模式下从 process.resourcesPath/bin 取（electron-builder extraResources 注入）。
+ * 开发模式下没有编译二进制——返回 undefined，由调用方回退到源码运行
+ * （bun apps/cli/src/index.ts）。
+ *
+ * @returns 二进制绝对路径；不存在时返回 undefined
+ */
+export function getBundledCliPath(): string | undefined {
+  const { app } = require('electron')
+  if (!app.isPackaged) return undefined
+  const binName = process.platform === 'win32' ? 'myyoda.exe' : 'myyoda'
+  const cliPath = join(process.resourcesPath, 'bin', binName)
+  return existsSync(cliPath) ? cliPath : undefined
+}
+
+/**
+ * 解析已打包的真实官方 `claude` 二进制路径（`@anthropic-ai/claude-agent-sdk-{platform}-{arch}`）。
+ *
+ * 从 `agent-orchestrator.ts` 抽取而来：Agent（Code）模式的 SDK 执行与
+ * `claude-oauth-service.ts` 的订阅登录都需要定位同一个二进制，抽到这里
+ * 避免登录服务依赖体量巨大的 orchestrator 模块图。
+ *
+ * 0.2.113+ 起 SDK 改为按平台分发 native binary，通过 optionalDependencies 安装到
+ * `@anthropic-ai/claude-agent-sdk-{platform}-{arch}` 子包，与主包 `@anthropic-ai/claude-agent-sdk`
+ * 同级。binary 名 macOS/Linux 为 `claude`，Windows 为 `claude.exe`。
+ *
+ * SDK 作为 esbuild external 依赖，require.resolve 可在运行时解析主包入口路径，
+ * 再沿父目录 `@anthropic-ai/` 找到同级的平台子包。
+ *
+ * 多种策略降级：createRequire → 全局 require → cwd/node_modules 手动查找。
+ * 打包环境下：asar 内的路径需要转换为 asar.unpacked 路径。
+ */
+export function resolveClaudeAgentBinaryPath(): string {
+  const { app } = require('electron')
+  const subpkg = `claude-agent-sdk-${process.platform}-${process.arch}`
+  const scopedSubpkg = `@anthropic-ai/${subpkg}`
+  const binaryName = process.platform === 'win32' ? 'claude.exe' : 'claude'
+  let binaryPath: string | null = null
+
+  try {
+    const cjsRequire = createRequire(__filename)
+    const sdkEntryPath = cjsRequire.resolve('@anthropic-ai/claude-agent-sdk')
+    const anthropicDir = join(sdkEntryPath, '..', '..')
+    binaryPath = join(anthropicDir, subpkg, binaryName)
+    if (!existsSync(binaryPath)) {
+      const subpkgPackagePath = cjsRequire.resolve(`${scopedSubpkg}/package.json`)
+      binaryPath = join(subpkgPackagePath, '..', binaryName)
+    }
+  } catch (e) {
+    console.warn('[配置路径] createRequire 解析 Claude 二进制路径失败:', e)
+  }
+
+  if (!binaryPath || !existsSync(binaryPath)) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const sdkEntryPath = require.resolve('@anthropic-ai/claude-agent-sdk')
+      const anthropicDir = join(sdkEntryPath, '..', '..')
+      binaryPath = join(anthropicDir, subpkg, binaryName)
+      if (!existsSync(binaryPath)) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const subpkgPackagePath = require.resolve(`${scopedSubpkg}/package.json`)
+        binaryPath = join(subpkgPackagePath, '..', binaryName)
+      }
+    } catch (e) {
+      console.warn('[配置路径] require.resolve 解析 Claude 二进制路径失败:', e)
+    }
+  }
+
+  if (!binaryPath || !existsSync(binaryPath)) {
+    binaryPath = join(__dirname, '..', 'node_modules', '@anthropic-ai', subpkg, binaryName)
+  }
+
+  if (app.isPackaged && binaryPath.includes('.asar')) {
+    binaryPath = binaryPath.replace(/\.asar([/\\])/, '.asar.unpacked$1')
+  }
+
+  return binaryPath
+}
+
+/**
+ * 从 SKILL.md 的 YAML frontmatter 中解析 version 字段
+ *
+ * 无 version 字段时返回 '0.0.0'（确保旧 Skill 会被更新）。
+ */
+export function parseSkillVersion(skillDir: string): string {
+  const skillMdPath = join(skillDir, 'SKILL.md')
+  if (!existsSync(skillMdPath)) return '0.0.0'
+
+  try {
+    let content = readFileSync(skillMdPath, 'utf-8')
+    if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1)
+    const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/)
+    if (!fmMatch?.[1]) return '0.0.0'
+
+    for (const line of fmMatch[1].split('\n')) {
+      const colonIdx = line.indexOf(':')
+      if (colonIdx === -1) continue
+      const key = line.slice(0, colonIdx).trim()
+      const value = line.slice(colonIdx + 1).trim().replace(/^["']|["']$/g, '')
+      if (key === 'version' && value) return value
+    }
+  } catch {
+    // 解析失败视为最低版本
+  }
+
+  return '0.0.0'
+}
+
+/** 比较两个 semver 版本字符串
+ *
+ * @returns 正数表示 a > b，0 表示相等，负数表示 a < b
+ */
+function compareSemver(a: string, b: string): number {
+  const pa = a.split('.').map(Number)
+  const pb = b.split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
+/** 防御性目录基名集合：复制 default skills 时永远跳过这些目录，避免
+ *  .git 0444 文件、node_modules 文件爆炸等场景把启动期同步链路炸掉。
+ * 注意：dist 不在过滤列表中——它是 skill 可能自带的合法运行时产物（如
+ * dashi-ppt 的 project/dist，package.json imports 直接引用），无条件过滤
+ * 会破坏这类 skill。构建产物防御只保留 .git / node_modules 等元数据目录。 */
+const DEFAULT_SKILL_COPY_BLOCKLIST = new Set([
+  '.git',
+  '.DS_Store',
+  'node_modules',
+  '.next',
+  '.cache',
+  '.turbo',
+  '__pycache__',
+])
+
+function defaultSkillCopyFilter(src: string): boolean {
+  return !DEFAULT_SKILL_COPY_BLOCKLIST.has(basename(src))
+}
+
+/**
+ * 从 app bundle 同步默认 Skills 到 ~/.myyoda/default-skills/
+ *
+ * 打包模式下从 process.resourcesPath/default-skills 复制。
+ * 开发模式下从源码 default-skills/ 目录复制。
+ *
+ * - 缺失的 Skill：直接复制
+ * - 已存在的 Skill：比较 SKILL.md 中的 version，bundled 更新时才覆盖
+ *   （避免每次启动同步 4MB+ 文件阻塞主进程）
+ */
+export function seedDefaultSkills(): void {
+  const { app } = require('electron')
+  const bundledDir = app.isPackaged
+    ? join(process.resourcesPath, 'default-skills')
+    : join(__dirname, '../default-skills')
+
+  if (!existsSync(bundledDir)) {
+    console.log('[配置] 未找到内置 default-skills 目录，跳过')
+    return
+  }
+
+  const userDir = getDefaultSkillsDir()
+
+  // 清理已从 bundle 移除但缓存在用户目录的退役内置 Skills
+  removeRetiredDefaultSkills(userDir)
+
+  try {
+    const entries = readdirSync(bundledDir, { withFileTypes: true })
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+
+      const source = join(bundledDir, entry.name)
+      const target = join(userDir, entry.name)
+
+      try {
+        if (!existsSync(target)) {
+          cpSync(source, target, { recursive: true, filter: defaultSkillCopyFilter })
+          console.log(`[配置] 已同步默认 Skill: ${entry.name}`)
+          continue
+        }
+
+        const bundledVer = parseSkillVersion(source)
+        const existingVer = parseSkillVersion(target)
+
+        if (compareSemver(bundledVer, existingVer) > 0) {
+          // rm-then-cp：rmSync 不依赖目标文件写权限（只读 .git/objects/ 等
+          // 0444 文件用 cpSync({ force: true }) 无法覆盖会 EACCES，但
+          // rmSync({ force: true }) 只需父目录可写就能 unlink）。
+          rmSync(target, { recursive: true, force: true })
+          cpSync(source, target, { recursive: true, filter: defaultSkillCopyFilter })
+          console.log(`[配置] 已升级默认 Skill: ${entry.name} (${existingVer} → ${bundledVer})`)
+        }
+      } catch (err) {
+        // 单 skill 失败不影响其他 skill 同步。这里吞错是为了防止启动期 bootstrap
+        // 链路被任意一个 skill 的同步异常掀翻——窗口和托盘必须先出来。
+        console.warn(`[配置] 同步默认 Skill 失败 (${entry.name})，跳过:`, err)
+      }
+    }
+  } catch (err) {
+    console.warn('[配置] 同步默认 Skills 失败:', err)
+  }
+}
+
+/**
+ * 获取微信配置文件路径
+ *
+ * @returns ~/.myyoda/wechat.json
+ */
+export function getWeChatConfigPath(): string {
+  return join(getConfigDir(), 'wechat.json')
+}
+
+/**
+ * 获取微信长轮询同步游标路径
+ *
+ * @returns ~/.myyoda/wechat-sync.json
+ */
+export function getWeChatSyncPath(): string {
+  return join(getConfigDir(), 'wechat-sync.json')
+}
+
+/**
+ * 获取微信聊天绑定持久化路径
+ *
+ * @returns ~/.myyoda/wechat-bindings.json
+ */
+export function getWeChatBindingsPath(): string {
+  return join(getConfigDir(), 'wechat-bindings.json')
+}
+
+/**
+ * 获取钉钉配置文件路径
+ *
+ * @returns ~/.myyoda/dingtalk.json
+ */
+export function getDingTalkConfigPath(): string {
+  return join(getConfigDir(), 'dingtalk.json')
+}
+
+/**
+ * 获取某个钉钉 Bot 的聊天绑定持久化路径
+ *
+ * @returns ~/.myyoda/dingtalk-bindings-{botId}.json
+ */
+export function getDingTalkBotBindingsPath(botId: string): string {
+  return join(getConfigDir(), `dingtalk-bindings-${botId}.json`)
+}
+
+/**
+ * 获取飞书配置文件路径
+ *
+ * @returns ~/.myyoda/feishu.json
+ */
+export function getFeishuConfigPath(): string {
+  return join(getConfigDir(), 'feishu.json')
+}
+
+/**
+ * 获取飞书聊天绑定持久化路径
+ *
+ * @returns ~/.myyoda/feishu-bindings.json
+ */
+export function getFeishuBindingsPath(): string {
+  return join(getConfigDir(), 'feishu-bindings.json')
+}
+
+/**
+ * 获取某个飞书 Bot 的聊天绑定持久化路径
+ *
+ * @returns ~/.myyoda/feishu-bindings-{botId}.json
+ */
+export function getFeishuBotBindingsPath(botId: string): string {
+  return join(getConfigDir(), `feishu-bindings-${botId}.json`)
+}
+
+/**
+ * 获取某个飞书 Bot 的运行时元数据持久化路径
+ *
+ * 用于保存最近交互用户 open_id 等需要跨进程重启恢复的状态。
+ *
+ * @returns ~/.myyoda/feishu-metadata-{botId}.json
+ */
+export function getFeishuBotMetadataPath(botId: string): string {
+  return join(getConfigDir(), `feishu-metadata-${botId}.json`)
+}
+
+/**
+ * 获取指定 Agent 会话的工作路径
+ *
+ * 在工作区目录下创建以 sessionId 命名的子文件夹，
+ * 作为该会话的独立 Agent cwd。如果目录不存在则自动创建。
+ *
+ * @param workspaceSlug 工作区 slug
+ * @param sessionId 会话 ID
+ * @returns ~/.myyoda/agent-workspaces/{slug}/{sessionId}/
+ */
+export function getAgentSessionWorkspacePath(workspaceSlug: string, sessionId: string): string {
+  const dir = join(getAgentWorkspacePath(workspaceSlug), sessionId)
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+    console.log(`[配置] 已创建 Agent 会话工作目录: ${dir}`)
+  }
+
+  return dir
+}
+
+/**
+ * 获取 SDK 隔离配置目录路径
+ *
+ * 用于设置 CLAUDE_CONFIG_DIR 环境变量，让 SDK 读取独立的配置文件，
+ * 而不是用户的 ~/.claude.json，实现 MyYoda 与 Claude Code CLI 的配置隔离。
+ *
+ * 如果目录不存在则自动创建。
+ *
+ * @returns ~/.myyoda/sdk-config/
+ */
+export function getSdkConfigDir(): string {
+  const dir = join(getConfigDir(), 'sdk-config')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+    console.log(`[配置] 已创建 SDK 配置目录: ${dir}`)
+  }
+
+  return dir
+}
+
+/**
+ * 获取 Scratch Pad 文件路径
+ *
+ * @returns ~/.myyoda/scratch-pad.md
+ */
+export function getScratchPadPath(): string {
+  return join(getConfigDir(), 'scratch-pad.md')
+}
+
+/**
+ * 获取定时任务（Automation）配置文件路径
+ *
+ * @returns ~/.myyoda/automations.json
+ */
+export function getAutomationsPath(): string {
+  return join(getConfigDir(), 'automations.json')
+}
+
+/** 规划模块本地 SQLite 数据库路径 */
+export function getPlanningDatabasePath(): string {
+  return join(getConfigDir(), 'planning.db')
+}
+
+/**
+ * 获取 Excalidraw 画布文件目录路径（按 Workspace）
+ *
+ * @param workspaceSlug 工作区 slug
+ * @returns ~/.myyoda/agent-workspaces/{slug}/excalidraw/
+ */
+export function getExcalidrawDir(workspaceSlug: string): string {
+  const dir = join(getAgentWorkspacePath(workspaceSlug), 'excalidraw')
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+
+  return dir
+}
+
+/**
+ * 已从 App bundle 移除、但仍需在既有用户目录中清理的默认 Skills。
+ *
+ * 不根据 bundle 中缺失的目录自动删除，避免误删用户自行安装的 Skills；
+ * 后续退役某个内置 Skill 时，显式把它的 slug 加到这里。
+ */
+export const RETIRED_DEFAULT_SKILL_SLUGS: readonly string[] = []
+
+const RETIRED_DEFAULT_SKILL_SLUG_SET = new Set(RETIRED_DEFAULT_SKILL_SLUGS)
+
+export function isRetiredDefaultSkill(slug: string): boolean {
+  return RETIRED_DEFAULT_SKILL_SLUG_SET.has(slug)
+}
+
+/** 清理 ~/.myyoda/default-skills/ 中已退役的内置 Skill 缓存。 */
+export function removeRetiredDefaultSkills(dir = getDefaultSkillsDir()): void {
+  for (const slug of RETIRED_DEFAULT_SKILL_SLUGS) {
+    const target = join(dir, slug)
+    if (!existsSync(target)) continue
+
+    try {
+      rmSyncWithRetry(target, { recursive: true, force: true })
+      console.log(`[Agent 工作区] 已移除退役默认 Skill 缓存: ${slug}`)
+    } catch (err) {
+      console.warn(`[Agent 工作区] 移除退役默认 Skill 缓存失败 (${slug}):`, err)
+    }
+  }
+}

@@ -1,0 +1,553 @@
+import { afterEach, describe, expect, test } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import type { TaskSpec } from '../schema.ts';
+import type { RunLogEntry } from '../storage.ts';
+import {
+  appendRunLog,
+  ensureUniqueTaskSlug,
+  getLatestRunId,
+  initializeRun,
+  isRunResumable,
+  listResumableRuns,
+  loadTaskSpec,
+  readNodeOutput,
+  readRunContextSnapshot,
+  readRunLog,
+  readRunLogIntegrity,
+  readRunSpecSnapshot,
+  rehydrateNodeStates,
+  runDir,
+  saveTaskSpec,
+  taskDir,
+  writeNodeOutput,
+  writeRunSpecSnapshot,
+} from '../storage.ts';
+
+const tempRoots: string[] = [];
+
+function createTempWorkspaceRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), 'myyoda-task-storage-'));
+  tempRoots.push(root);
+  return root;
+}
+
+afterEach(() => {
+  for (const root of tempRoots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function buildSpec(overrides: Partial<TaskSpec> = {}): TaskSpec {
+  return {
+    id: 'demo-task',
+    title: 'Demo task',
+    goal: 'Lock migration boundary',
+    runner: 'conduct',
+    nodes: [
+      {
+        id: 'draft',
+        kind: 'session',
+        prompt: 'draft the task',
+      },
+    ],
+    ...overrides,
+  };
+}
+
+describe('task storage', () => {
+  test('saveTaskSpec 以原子替换更新 task.yaml，且不留下临时文件', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const first = buildSpec();
+    const second = buildSpec({
+      title: 'Updated task',
+      goal: 'Use the replacement file',
+      nodes: [{ id: 'draft', kind: 'session', prompt: 'draft again' }],
+    });
+
+    saveTaskSpec(workspaceRoot, first);
+    saveTaskSpec(workspaceRoot, second);
+
+    const loaded = loadTaskSpec(workspaceRoot, second.id);
+    expect(loaded?.valid).toBe(true);
+    expect(loaded?.spec).toEqual(second);
+
+    const fileContents = readFileSync(join(taskDir(workspaceRoot, second.id), 'task.yaml'), 'utf-8');
+    expect(fileContents).toContain('Updated task');
+    expect(fileContents).not.toContain('Demo task');
+    expect(readdirSync(taskDir(workspaceRoot, second.id)).some((entry) => entry.endsWith('.tmp'))).toBe(false);
+  });
+
+  test('ensureUniqueTaskSlug 在 slug 未被占用时原样返回', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    expect(ensureUniqueTaskSlug(workspaceRoot, 'demo-task')).toBe('demo-task');
+  });
+
+  test('ensureUniqueTaskSlug 在 slug 已存在时追加 -2 -3... 直到唯一', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    saveTaskSpec(workspaceRoot, buildSpec({ id: 'demo-task' }));
+    saveTaskSpec(workspaceRoot, buildSpec({ id: 'demo-task-2' }));
+
+    expect(ensureUniqueTaskSlug(workspaceRoot, 'demo-task')).toBe('demo-task-3');
+  });
+
+  test('saveTaskSpec 会拒绝 depends_on 指向未知节点的 spec', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const invalid = buildSpec({
+      nodes: [
+        {
+          id: 'draft',
+          kind: 'session',
+          prompt: 'draft the task',
+          depends_on: ['missing-node'],
+        },
+      ],
+    });
+
+    expect(() => saveTaskSpec(workspaceRoot, invalid)).toThrow(/未知节点|无效/i);
+    expect(existsSync(taskDir(workspaceRoot, invalid.id))).toBe(false);
+  });
+
+  test('saveTaskSpec 会拒绝存在循环依赖的 spec', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const invalid = buildSpec({
+      nodes: [
+        {
+          id: 'draft',
+          kind: 'session',
+          prompt: 'draft the task',
+          depends_on: ['review'],
+        },
+        {
+          id: 'review',
+          kind: 'session',
+          prompt: 'review the task',
+          depends_on: ['draft'],
+        },
+      ],
+    });
+
+    expect(() => saveTaskSpec(workspaceRoot, invalid)).toThrow(/循环|无效/i);
+    expect(existsSync(taskDir(workspaceRoot, invalid.id))).toBe(false);
+  });
+
+  test('readRunLog 会跳过损坏的最终 JSONL 行，rehydrate 不会误判节点成功', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const runId = 'run-1';
+    const logPath = join(runDir(workspaceRoot, slug, runId), 'run-log.jsonl');
+
+    appendRunLog(workspaceRoot, slug, runId, {
+      t: '2026-07-13T00:00:00.000Z',
+      kind: 'run-started',
+      taskId: slug,
+      runId,
+    });
+    appendRunLog(workspaceRoot, slug, runId, {
+      t: '2026-07-13T00:00:01.000Z',
+      kind: 'node-scheduled',
+      nodeId: 'draft',
+    });
+    appendRunLog(workspaceRoot, slug, runId, {
+      t: '2026-07-13T00:00:02.000Z',
+      kind: 'node-spawned',
+      nodeId: 'draft',
+      sessionId: 'session-1',
+    });
+    writeFileSync(
+      logPath,
+      `${readFileSync(logPath, 'utf-8')}{"t":"2026-07-13T00:00:03.000Z","kind":"node-finished","nodeId":"draft","sessionId":"session-1","state":"done"`,
+      'utf-8',
+    );
+
+    const log = readRunLog(workspaceRoot, slug, runId);
+    expect(log.map((entry) => entry.kind)).toEqual(['run-started', 'node-scheduled', 'node-spawned']);
+
+    const nodeStates = rehydrateNodeStates(['draft'], log);
+    expect(nodeStates.draft).toEqual({
+      attempt: 1,
+      sessionId: 'session-1',
+      state: 'pending',
+    });
+  });
+
+  test('readRunLog 会跳过合法 JSON 但缺少 kind、必需字段或非法 state 的行', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const runId = 'run-1';
+    const logPath = join(runDir(workspaceRoot, slug, runId), 'run-log.jsonl');
+
+    appendRunLog(workspaceRoot, slug, runId, {
+      t: '2026-07-13T00:00:00.000Z',
+      kind: 'run-started',
+      taskId: slug,
+      runId,
+    });
+
+    writeFileSync(
+      logPath,
+      [
+        readFileSync(logPath, 'utf-8').trimEnd(),
+        JSON.stringify({ t: '2026-07-13T00:00:01.000Z', nodeId: 'draft' }),
+        JSON.stringify({ t: '2026-07-13T00:00:02.000Z', kind: 'node-spawned', nodeId: 'draft' }),
+        JSON.stringify({
+          t: '2026-07-13T00:00:03.000Z',
+          kind: 'node-finished',
+          nodeId: 'draft',
+          sessionId: 'session-1',
+          state: 'broken',
+        }),
+        JSON.stringify({
+          t: '2026-07-13T00:00:04.000Z',
+          kind: 'node-finished',
+          nodeId: 'draft',
+          sessionId: 'session-1',
+          state: 'done',
+        }),
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const log = readRunLog(workspaceRoot, slug, runId);
+    expect(log).toEqual([
+      {
+        t: '2026-07-13T00:00:00.000Z',
+        kind: 'run-started',
+        taskId: slug,
+        runId,
+      },
+      {
+        t: '2026-07-13T00:00:04.000Z',
+        kind: 'node-finished',
+        nodeId: 'draft',
+        sessionId: 'session-1',
+        state: 'done',
+      },
+    ]);
+  });
+
+  test('readRunLogIntegrity 允许尾行截断，但中段损坏进入 recovery-required', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const runId = 'run-integrity';
+    const logPath = join(runDir(workspaceRoot, slug, runId), 'run-log.jsonl');
+    mkdirSync(runDir(workspaceRoot, slug, runId), { recursive: true });
+    writeFileSync(logPath, [
+      JSON.stringify({ t: '2026-07-13T00:00:00.000Z', seq: 1, kind: 'run-started', taskId: slug, runId }),
+      '{broken-middle',
+      JSON.stringify({ t: '2026-07-13T00:00:02.000Z', seq: 2, kind: 'run-paused' }),
+      '',
+    ].join('\n'));
+
+    expect(readRunLogIntegrity(workspaceRoot, slug, runId)).toEqual(
+      expect.objectContaining({
+        recoveryRequired: true,
+        tailTruncated: false,
+        errors: expect.arrayContaining([expect.objectContaining({ line: 2 })]),
+      }),
+    );
+
+    writeFileSync(logPath, [
+      JSON.stringify({ t: '2026-07-13T00:00:00.000Z', seq: 1, kind: 'run-started', taskId: slug, runId }),
+      '{truncated-tail',
+    ].join('\n'));
+    expect(readRunLogIntegrity(workspaceRoot, slug, runId)).toEqual(
+      expect.objectContaining({ recoveryRequired: false, tailTruncated: true }),
+    );
+  });
+
+  test('readRunLogIntegrity 检测 sequence 断裂', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const runId = 'run-sequence-gap';
+    const logPath = join(runDir(workspaceRoot, slug, runId), 'run-log.jsonl');
+    mkdirSync(runDir(workspaceRoot, slug, runId), { recursive: true });
+    writeFileSync(logPath, [
+      JSON.stringify({ t: '2026-07-13T00:00:00.000Z', seq: 1, kind: 'run-started', taskId: slug, runId }),
+      JSON.stringify({ t: '2026-07-13T00:00:01.000Z', seq: 3, kind: 'run-paused' }),
+      '',
+    ].join('\n'));
+
+    expect(readRunLogIntegrity(workspaceRoot, slug, runId)).toEqual(
+      expect.objectContaining({
+        recoveryRequired: true,
+        errors: expect.arrayContaining([
+          expect.objectContaining({ message: expect.stringContaining('sequence 断裂') }),
+        ]),
+      }),
+    );
+  });
+
+  test('readRunLog 会保留 run-started 的 params 与 verifyOnComplete', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const runId = 'run-1';
+
+    appendRunLog(workspaceRoot, slug, runId, {
+      t: '2026-07-13T00:00:00.000Z',
+      kind: 'run-started',
+      taskId: slug,
+      runId,
+      params: {
+        topic: 'alpha',
+        count: 2,
+      },
+      verifyOnComplete: false,
+    });
+
+    expect(readRunLog(workspaceRoot, slug, runId)).toEqual([
+      {
+        t: '2026-07-13T00:00:00.000Z',
+        kind: 'run-started',
+        taskId: slug,
+        runId,
+        params: {
+          topic: 'alpha',
+          count: 2,
+        },
+        verifyOnComplete: false,
+      },
+    ]);
+  });
+
+  test('run spec snapshot 按 runId 隔离存储', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const first = buildSpec();
+    const second = buildSpec({
+      title: 'Second snapshot',
+      goal: 'Preserve run isolation',
+    });
+
+    writeRunSpecSnapshot(workspaceRoot, slug, 'run-1', first);
+    writeRunSpecSnapshot(workspaceRoot, slug, 'run-2', second);
+
+    expect(readRunSpecSnapshot(workspaceRoot, slug, 'run-1')).toEqual(first);
+    expect(readRunSpecSnapshot(workspaceRoot, slug, 'run-2')).toEqual(second);
+  });
+
+  test('无 Project 的旧 Workspace Task snapshot 原样保留 scope 语义', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'workspace-task';
+    const spec = buildSpec({ id: slug, project: undefined, cwd: undefined });
+
+    writeRunSpecSnapshot(workspaceRoot, slug, 'run-workspace', spec);
+
+    const snapshot = readRunSpecSnapshot(workspaceRoot, slug, 'run-workspace');
+    expect(snapshot).toEqual(spec);
+    expect(snapshot?.project).toBeUndefined();
+    expect(snapshot?.cwd).toBeUndefined();
+  });
+
+  test('initializeRun 原子保留 runId 并写入不可变执行上下文', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const spec = buildSpec();
+    const context = {
+      schemaVersion: 1 as const,
+      taskId: '018f47a8-6c26-7a13-9bf6-7c8d4f2e4c72',
+      taskSlug: slug,
+      runId: 'run-fixed',
+      scope: { kind: 'workspace' as const },
+      effectiveCwd: '/repo/frozen',
+      effectiveCwdSource: 'workspace' as const,
+      createdAt: '2026-07-29T00:00:00.000Z',
+      verifyOnComplete: false,
+    };
+
+    initializeRun(workspaceRoot, slug, 'run-fixed', spec, context);
+
+    expect(readRunSpecSnapshot(workspaceRoot, slug, 'run-fixed')).toEqual(spec);
+    expect(readRunContextSnapshot(workspaceRoot, slug, 'run-fixed')).toEqual(context);
+    expect(() => initializeRun(workspaceRoot, slug, 'run-fixed', buildSpec({ title: 'overwrite' }), context))
+      .toThrow(/runId|已存在|占用/i);
+    expect(readRunSpecSnapshot(workspaceRoot, slug, 'run-fixed')).toEqual(spec);
+  });
+
+  test('getLatestRunId 按 context/run-started 时间选择，不依赖 runId 字典序', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const spec = buildSpec();
+    initializeRun(workspaceRoot, slug, 'z-older', spec, {
+      schemaVersion: 1,
+      taskId: slug,
+      taskSlug: slug,
+      runId: 'z-older',
+      scope: { kind: 'workspace' },
+      createdAt: '2026-07-28T00:00:00.000Z',
+      verifyOnComplete: false,
+    });
+    initializeRun(workspaceRoot, slug, 'a-newer', spec, {
+      schemaVersion: 1,
+      taskId: slug,
+      taskSlug: slug,
+      runId: 'a-newer',
+      scope: { kind: 'workspace' },
+      createdAt: '2026-07-29T00:00:00.000Z',
+      verifyOnComplete: false,
+    });
+
+    expect(getLatestRunId(workspaceRoot, slug)).toBe('a-newer');
+  });
+
+  test('readRunSpecSnapshot 在结构无效时返回 null', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const runId = 'run-1';
+
+    mkdirSync(runDir(workspaceRoot, slug, runId), { recursive: true });
+    writeFileSync(
+      join(runDir(workspaceRoot, slug, runId), 'spec.json'),
+      JSON.stringify({
+        id: slug,
+        title: 'Broken snapshot',
+        goal: 'missing nodes',
+      }),
+      'utf-8',
+    );
+
+    expect(readRunSpecSnapshot(workspaceRoot, slug, runId)).toBeNull();
+  });
+
+  test('节点输出可持久化并回读', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const runId = 'run-1';
+
+    writeNodeOutput(workspaceRoot, slug, runId, 'draft', {
+      text: '最终输出',
+      params: {
+        summary: '摘要',
+        count: 2,
+      },
+    });
+
+    expect(readNodeOutput(workspaceRoot, slug, runId, 'draft')).toEqual({
+      text: '最终输出',
+      params: {
+        summary: '摘要',
+        count: 2,
+      },
+    });
+  });
+
+  test('readNodeOutput 在缺少 text 时返回 null', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const runId = 'run-1';
+    const outputPath = join(runDir(workspaceRoot, slug, runId), 'nodes', 'draft.json');
+
+    mkdirSync(join(runDir(workspaceRoot, slug, runId), 'nodes'), { recursive: true });
+    writeFileSync(
+      outputPath,
+      JSON.stringify({
+        params: {
+          summary: 'only params',
+        },
+      }),
+      'utf-8',
+    );
+
+    expect(readNodeOutput(workspaceRoot, slug, runId, 'draft')).toBeNull();
+  });
+
+  test('rehydrate 会把缺失输出文件的 done 节点回退为 pending', () => {
+    const log: RunLogEntry[] = [
+      {
+        t: '2026-07-13T00:00:00.000Z',
+        kind: 'run-started',
+        taskId: 'demo-task',
+        runId: 'run-1',
+      },
+      {
+        t: '2026-07-13T00:00:01.000Z',
+        kind: 'node-scheduled',
+        nodeId: 'draft',
+      },
+      {
+        t: '2026-07-13T00:00:02.000Z',
+        kind: 'node-spawned',
+        nodeId: 'draft',
+        sessionId: 'session-1',
+      },
+      {
+        t: '2026-07-13T00:00:03.000Z',
+        kind: 'node-finished',
+        nodeId: 'draft',
+        sessionId: 'session-1',
+        state: 'done',
+      },
+    ];
+
+    const nodeStates = rehydrateNodeStates(['draft'], log, () => null);
+    expect(nodeStates.draft).toEqual({
+      attempt: 1,
+      sessionId: 'session-1',
+      state: 'pending',
+    });
+  });
+
+  test('appendRunLog 按 JSONL 逐行追加', () => {
+    const workspaceRoot = createTempWorkspaceRoot();
+    const slug = 'demo-task';
+    const runId = 'run-1';
+
+    appendRunLog(workspaceRoot, slug, runId, {
+      t: '2026-07-13T00:00:00.000Z',
+      kind: 'run-started',
+      taskId: slug,
+      runId,
+    });
+    appendRunLog(workspaceRoot, slug, runId, {
+      t: '2026-07-13T00:00:01.000Z',
+      kind: 'run-completed',
+    });
+
+    const lines = readFileSync(join(runDir(workspaceRoot, slug, runId), 'run-log.jsonl'), 'utf-8').trimEnd().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines.every((line) => line.startsWith('{') && line.endsWith('}'))).toBe(true);
+    expect(existsSync(join(runDir(workspaceRoot, slug, runId), 'run-log.jsonl'))).toBe(true);
+  });
+
+  test('isRunResumable 在 completed/failed/stopped 后不可恢复，paused 仍可恢复', () => {
+    expect(isRunResumable([])).toBe(false)
+    expect(isRunResumable([
+      { t: 't0', kind: 'run-started', taskId: 'demo', runId: 'run-1' },
+      { t: 't1', kind: 'run-paused' },
+    ])).toBe(true)
+    expect(isRunResumable([
+      { t: 't0', kind: 'run-started', taskId: 'demo', runId: 'run-1' },
+      { t: 't1', kind: 'run-completed' },
+    ])).toBe(false)
+    expect(isRunResumable([
+      { t: 't0', kind: 'run-started', taskId: 'demo', runId: 'run-1' },
+      { t: 't1', kind: 'run-failed' },
+    ])).toBe(false)
+  })
+
+  test('listResumableRuns 只返回未结束的 run', () => {
+    const workspaceRoot = createTempWorkspaceRoot()
+    saveTaskSpec(workspaceRoot, buildSpec())
+
+    appendRunLog(workspaceRoot, 'demo-task', 'run-active', {
+      t: '2026-07-13T00:00:00.000Z',
+      kind: 'run-started',
+      taskId: 'demo-task',
+      runId: 'run-active',
+    })
+    appendRunLog(workspaceRoot, 'demo-task', 'run-done', {
+      t: '2026-07-13T00:00:00.000Z',
+      kind: 'run-started',
+      taskId: 'demo-task',
+      runId: 'run-done',
+    })
+    appendRunLog(workspaceRoot, 'demo-task', 'run-done', {
+      t: '2026-07-13T00:00:01.000Z',
+      kind: 'run-completed',
+    })
+
+    expect(listResumableRuns(workspaceRoot)).toEqual([{ slug: 'demo-task', runId: 'run-active' }])
+  })
+});
