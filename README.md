@@ -4,7 +4,7 @@
 
 MyYoda 是面向真实研发交付的本地优先 AI Coding 工作台。它把多模型对话、代码执行、项目上下文、任务编排、协作子 Agent、自动任务和持续知识沉淀整合在一个桌面应用中。
 
-**[English](./README.en.md)** · **[下载最新版本](https://github.com/GeoffBao/MyYoda/releases)** · **[使用指南](./apps/electron/resources/tutorial.md)**
+**[English](./README.en.md)** · **[下载最新版本](https://github.com/xcdha/MyYoda/releases)** · **[使用指南](./apps/electron/resources/tutorial.md)**
 
 ## 为什么选择 MyYoda
 
@@ -69,7 +69,7 @@ Projects & Kanban 位于 Code 内。进入 Code 后，可在“会话”和“�
 
 ### 1. 安装
 
-从 [GitHub Releases](https://github.com/GeoffBao/MyYoda/releases) 下载适用于 macOS 或 Windows 的安装包。
+从 [GitHub Releases](https://github.com/xcdha/MyYoda/releases) 下载适用于 macOS 或 Windows 的安装包。
 
 ### 2. 配置模型
 

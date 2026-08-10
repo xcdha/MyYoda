@@ -19,7 +19,7 @@
 export const DEFAULT_GIT_ATTRIBUTION_ENABLED = true
 
 /** 开源仓库完整地址 */
-export const MYYODA_GITHUB_URL = 'https://github.com/GeoffBao/MyYoda'
+export const MYYODA_GITHUB_URL = 'https://github.com/xcdha/MyYoda'
 
 /** Commit trailer key（标准 git trailer key） */
 export const MYYODA_COMMIT_TRAILER_KEY = 'Co-Authored-By'
@@ -136,7 +136,7 @@ ${MYYODA_PR_ATTRIBUTION}
 \`\`\`
 
 - 开源仓库：\`${MYYODA_GITHUB_URL}\`（不要写成其他错误地址）
-- 若 body 已含 \`github.com/GeoffBao/MyYoda\` 的 Made with / Generated with 行，不要重复
+- 若 body 已含 \`github.com/xcdha/MyYoda\` 的 Made with / Generated with 行，不要重复
 - \`gh pr create\` 时把上述行放进 \`--body\` 末尾；若用 body 文件，同样追加在文件末尾
 
 ### 关闭方式

@@ -208,6 +208,6 @@ linux:
 # ============================================
 publish:
   provider: github
-  owner: GeoffBao
+  owner: xcdha
   repo: MyYoda
   releaseType: release
