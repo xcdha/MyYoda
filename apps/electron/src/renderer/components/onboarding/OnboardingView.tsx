@@ -24,7 +24,7 @@ interface OnboardingViewProps {
   onComplete: (action?: OnboardingCompleteAction) => void
 }
 
-const TUTORIAL_ASSETS_BASE = 'https://github.com/GeoffBao/MyYoda/releases/download/tutorial-assets'
+const TUTORIAL_ASSETS_BASE = 'https://github.com/xcdha/MyYoda/releases/download/tutorial-assets'
 
 export function OnboardingView({ onComplete }: OnboardingViewProps) {
   const [step, setStep] = useState<'welcome' | 'environment'>('welcome')

@@ -4,7 +4,7 @@
 
 MyYoda is a local-first AI coding workbench built for real software delivery. It brings multi-model chat, code execution, project context, task orchestration, collaborative sub-agents, automation, and durable knowledge into one desktop application.
 
-**[中文](./README.md)** · **[Download the latest release](https://github.com/GeoffBao/MyYoda/releases)** · **[User Guide](./apps/electron/resources/tutorial.md)**
+**[中文](./README.md)** · **[Download the latest release](https://github.com/xcdha/MyYoda/releases)** · **[User Guide](./apps/electron/resources/tutorial.md)**
 
 ## Why MyYoda
 
@@ -69,7 +69,7 @@ Subscription login channels are currently intended for Code. Chat availability d
 
 ### 1. Install
 
-Download the macOS or Windows build from [GitHub Releases](https://github.com/GeoffBao/MyYoda/releases).
+Download the macOS or Windows build from [GitHub Releases](https://github.com/xcdha/MyYoda/releases).
 
 ### 2. Configure a Model
 

@@ -143,7 +143,7 @@ export function createApplicationMenu(): Menu {
         {
           label: '了解更多',
           click: async () => {
-            await shell.openExternal('https://github.com/GeoffBao/MyYoda')
+            await shell.openExternal('https://github.com/xcdha/MyYoda')
           },
         },
       ],

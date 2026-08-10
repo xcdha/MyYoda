@@ -7,7 +7,7 @@
 
 import type { InstallerManifest, InstallerSource } from '@myyoda/shared'
 
-const MANIFEST_URL = 'https://raw.githubusercontent.com/GeoffBao/MyYoda/main/installer-manifest.json'
+const MANIFEST_URL = 'https://raw.githubusercontent.com/xcdha/MyYoda/main/installer-manifest.json'
 const CACHE_TTL_MS = 5 * 60 * 1000
 
 interface ManifestCache {

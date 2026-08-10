@@ -3,9 +3,9 @@
   "version": "0.7.4",
   "description": "MyYoda next gen ai software with general agents - Electron App",
   "main": "dist/main.cjs",
-  "homepage": "https://github.com/GeoffBao/MyYoda",
+  "homepage": "https://github.com/xcdha/MyYoda",
   "author": {
-    "name": "GeoffBao",
+    "name": "xcdha",
     "email": "erlichliu@gmail.com"
   },
   "private": true,
