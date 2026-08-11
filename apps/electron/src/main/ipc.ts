@@ -187,6 +187,7 @@ import {
   getPullRequestPanelState,
   getDefaultBranch,
 } from './lib/pull-request-service'
+import { getGhCliStatus } from './lib/gh-cli'
 import { listGitBranchesForSession, prepareSessionGitContext } from './lib/git-session-context-service'
 import { registerPromaFilePath } from './lib/local-file-protocol'
 import { registerUpdaterIpc } from './lib/updater/updater-ipc'

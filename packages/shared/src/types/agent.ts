@@ -51,6 +51,23 @@ export type ThinkingConfig =
  */
 export type AgentEffort = 'low' | 'medium' | 'high' | 'max'
 
+/**
+ * 本机 gh（GitHub CLI）安装 / 登录状态
+ *
+ * 供 PR 工作流与「上传本地 Skill 到社区市场」检测本机 gh 环境使用；
+ * 数据由主进程 gh-cli.ts 探测得出，不存储任何 GitHub 凭证。
+ */
+export interface GhCliStatus {
+  /** 是否检测到 gh 可执行文件 */
+  installed: boolean
+  /** gh 版本号（未安装时为 undefined） */
+  version?: string
+  /** 是否已通过 `gh auth login` 登录 github.com */
+  authenticated: boolean
+  /** 登录用户名（未登录时为 undefined） */
+  login?: string
+}
+
 /** Agent 思考等级（Pi runtime / craft 对齐；会话级 sticky） */
 export type AgentThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
