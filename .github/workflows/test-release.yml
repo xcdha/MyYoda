@@ -30,6 +30,8 @@ jobs:
   validate-test-version:
     name: validate test version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: 检出代码
@@ -117,13 +119,13 @@ jobs:
         run: bun run electron:build
         working-directory: .
 
-      - name: 打包并发布 (macOS arm64 测试版)
+      - name: 打包 (macOS arm64 测试版，不自动发布)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ env.MAC_CERTS != '' }}
         run: |
           for i in 1 2 3; do
-            if npx electron-builder --mac --arm64 --publish always; then
+            if npx electron-builder --mac --arm64 --publish never; then
               exit 0
             fi
             if [ "$i" -lt 3 ]; then
@@ -133,6 +135,17 @@ jobs:
           done
           echo "macOS ARM64 packaging failed after 3 attempts"
           exit 1
+        working-directory: apps/electron
+
+      - name: 上传产物到 pre-release (v<version>-debug)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ needs.validate-test-version.outputs.version }}"
+          tag="v${version}-debug"
+          # 显式上传到 debug 专属 pre-release，避免 electron-builder 自动定位
+          # 到同 commit 的正式 tag（v0.7.7 与 v0.7.7-debug 指向同一提交）
+          gh release upload "${tag}" dist/* --clobber
         working-directory: apps/electron
 
   build-linux:
@@ -161,10 +174,19 @@ jobs:
         run: bun run electron:build
         working-directory: .
 
-      - name: 打包并发布 (Linux/Ubuntu 测试版)
+      - name: 打包 (Linux/Ubuntu 测试版，不自动发布)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --linux --x64 --publish always
+        run: npx electron-builder --linux --x64 --publish never
+        working-directory: apps/electron
+
+      - name: 上传产物到 pre-release (v<version>-debug)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ needs.validate-test-version.outputs.version }}"
+          tag="v${version}-debug"
+          gh release upload "${tag}" dist/* --clobber
         working-directory: apps/electron
 
   build-windows-x64:
@@ -193,8 +215,17 @@ jobs:
         run: bun run electron:build
         working-directory: .
 
-      - name: 打包并发布 (Windows 测试版)
+      - name: 打包 (Windows 测试版，不自动发布)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win --x64 --publish always
+        run: npx electron-builder --win --x64 --publish never
+        working-directory: apps/electron
+
+      - name: 上传产物到 pre-release (v<version>-debug)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ needs.validate-test-version.outputs.version }}"
+          tag="v${version}-debug"
+          gh release upload "${tag}" dist/* --clobber
         working-directory: apps/electron
