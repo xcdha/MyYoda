@@ -31,6 +31,7 @@ import { WorkspaceContextView } from '@/components/agent-skills/WorkspaceContext
 import { RepoWikiView } from '@/components/repo-wiki/RepoWikiView'
 import { ExcalidrawView } from '@/components/excalidraw/ExcalidrawView'
 import { BrowserPanel } from '@/components/browser/BrowserPanel'
+import { FullscreenSidebarToggleBar } from '@/components/app-shell/FullscreenSidebarToggleBar'
 import { automationFormAtom } from '@/atoms/automation-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
 import { interfaceVariantAtom } from '@/atoms/theme'
@@ -59,6 +60,20 @@ export function MainArea(): React.ReactElement {
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
   const store = useStore()
+
+  // 当前是否为"全屏视图"（直接替换 TabBar + TabContent，MainArea 下方不再渲染 TabBar）。
+  // 此时侧边栏收起态下 TabBar 里的展开按钮也一并消失，需要单独提供唤回入口。
+  const isFullscreenView =
+    appMode === 'cowork'
+    || codeMainRoute === 'task-board'
+    || codeMainRoute === 'project-page'
+    || activeView === 'planning'
+    || activeView === 'agent-skills'
+    || activeView === 'workspace-context'
+    || activeView === 'repo-wiki'
+    || activeView === 'excalidraw-gallery'
+    || activeView === 'excalidraw-editor'
+    || activeView === 'browser'
 
   // Tab 内容渲染降级为非紧急：TabBar 立即高亮新 tab，主区域昂贵渲染（含 PreviewPanel 中
   // DiffTabContent → ProseMirror editor mount + Shiki tokenize）让出主线程，避免点击 tab
@@ -235,6 +250,10 @@ export function MainArea(): React.ReactElement {
             className={cn('flex flex-col min-w-0 h-full relative', showPreview && 'mr-0.5')}
             style={leftFlexStyle}
           >
+            {/* 全屏视图（Yoda 插件/记忆/知识库/画布/浏览器等）替换了 TabBar + TabContent：
+                侧栏收起后 TabBar 里的展开按钮一并消失，这里在顶部原 TabBar 位置补一条展开条，
+                保持与普通视图"收起态 TabBar 最左出现展开按钮"一致的交互。 */}
+            {isFullscreenView && <FullscreenSidebarToggleBar />}
             {appMode === 'cowork' ? (
               // 遗留 cowork 兜底：AppShell 会迁移到 agent + codeMainView='work'；
               // 保留此分支避免迁移前一帧空白。
