@@ -138,6 +138,7 @@ jobs:
         working-directory: apps/electron
 
       - name: 上传产物到 pre-release (v<version>-debug)
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -145,7 +146,12 @@ jobs:
           tag="v${version}-debug"
           # 显式上传到 debug 专属 pre-release，避免 electron-builder 自动定位
           # 到同 commit 的正式 tag（v0.7.7 与 v0.7.7-debug 指向同一提交）
-          gh release upload "${tag}" dist/* --clobber
+          # 只上传文件，跳过 renderer/resources 等子目录（gh 不能上传目录）
+          for f in dist/*; do
+            if [ -f "$f" ]; then
+              gh release upload "${tag}" "$f" --clobber
+            fi
+          done
         working-directory: apps/electron
 
   build-linux:
@@ -181,12 +187,18 @@ jobs:
         working-directory: apps/electron
 
       - name: 上传产物到 pre-release (v<version>-debug)
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           version="${{ needs.validate-test-version.outputs.version }}"
           tag="v${version}-debug"
-          gh release upload "${tag}" dist/* --clobber
+          # 只上传文件，跳过 renderer/resources 等子目录
+          for f in dist/*; do
+            if [ -f "$f" ]; then
+              gh release upload "${tag}" "$f" --clobber
+            fi
+          done
         working-directory: apps/electron
 
   build-windows-x64:
@@ -222,10 +234,16 @@ jobs:
         working-directory: apps/electron
 
       - name: 上传产物到 pre-release (v<version>-debug)
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           version="${{ needs.validate-test-version.outputs.version }}"
           tag="v${version}-debug"
-          gh release upload "${tag}" dist/* --clobber
+          # 只上传文件，跳过 renderer/resources 等子目录
+          for f in dist/*; do
+            if [ -f "$f" ]; then
+              gh release upload "${tag}" "$f" --clobber
+            fi
+          done
         working-directory: apps/electron
