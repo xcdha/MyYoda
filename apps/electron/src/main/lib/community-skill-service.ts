@@ -20,6 +20,7 @@ import decompress from 'decompress'
 import decompressTargz from 'decompress-targz'
 import { load as loadYaml } from 'js-yaml'
 import type { CommunitySkill as SharedCommunitySkill } from '@myyoda/shared'
+import { getFetchFn } from './proxy-fetch'
 
 /** 市场仓库配置（默认 MyYoda 私有市场） */
 export const COMMUNITY_MARKET = {
@@ -30,6 +31,20 @@ export const COMMUNITY_MARKET = {
   /** 清单解析后 skills 目录根（仓库内相对路径） */
   skillsRoot: 'skills',
 } as const
+
+/**
+ * 社区市场专用 fetch：优先走环境变量代理（HTTPS_PROXY/HTTP_PROXY），
+ * 未配置代理时回落为全局 fetch。
+ *
+ * 背景：Node 原生 fetch（undici）不读取 HTTP_PROXY/HTTPS_PROXY 环境变量，
+ * 而国内用户访问 raw.githubusercontent.com 通常必须走代理，直连会
+ * 超时抛 `TypeError: fetch failed`。这里复用 proxy-fetch.ts 的代理能力。
+ */
+const communityFetch: typeof globalThis.fetch = (() => {
+  const proxyCandidates = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy']
+  const proxyUrl = proxyCandidates.find((key) => (process.env[key] ?? '').trim())
+  return getFetchFn(proxyUrl ? process.env[proxyUrl] : undefined)
+})()
 
 /** 可选远端下载统计服务（未配置时仅本地计数） */
 export const COMMUNITY_STATS_ENDPOINT = process.env.MYYODA_SKILL_STATS_URL ?? ''
@@ -130,7 +145,7 @@ export function parseSourcesYaml(text: string): CommunitySkill[] {
 /** 拉取市场清单 */
 export async function fetchCommunityManifest(): Promise<CommunitySkill[]> {
   const url = `https://raw.githubusercontent.com/${COMMUNITY_MARKET.repo}/${COMMUNITY_MARKET.branch}/${COMMUNITY_MARKET.manifestPath}`
-  const res = await fetch(url)
+  const res = await communityFetch(url)
   if (!res.ok) {
     throw new Error(`拉取社区市场清单失败 (${res.status})`)
   }
@@ -146,7 +161,7 @@ export async function fetchCommunityManifest(): Promise<CommunitySkill[]> {
   }))
   if (COMMUNITY_STATS_ENDPOINT) {
     try {
-      const statsRes = await fetch(`${COMMUNITY_STATS_ENDPOINT}/stats`)
+      const statsRes = await communityFetch(`${COMMUNITY_STATS_ENDPOINT}/stats`)
       if (statsRes.ok) {
         const stats = (await statsRes.json()) as Record<string, number>
         for (const s of merged) {
@@ -170,7 +185,7 @@ function inferCategory(path: string): string {
 /** 下载任意 GitHub 仓库 tar.gz 到临时目录并解压，返回解压后的仓库根目录 */
 async function downloadAndExtractRepo(repo: string, branch: string): Promise<string> {
   const url = `https://codeload.github.com/${repo}/tar.gz/refs/heads/${branch}`
-  const res = await fetch(url)
+  const res = await communityFetch(url)
   if (!res.ok) {
     throw new Error(`下载仓库失败 ${repo} (${res.status})`)
   }
@@ -202,7 +217,7 @@ export async function reportDownload(name: string): Promise<void> {
   // 远端统计服务（可选）
   try {
     if (COMMUNITY_STATS_ENDPOINT) {
-      await fetch(`${COMMUNITY_STATS_ENDPOINT}/download`, {
+      await communityFetch(`${COMMUNITY_STATS_ENDPOINT}/download`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ skill: name }),
