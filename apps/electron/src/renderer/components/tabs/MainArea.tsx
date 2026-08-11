@@ -32,6 +32,7 @@ import { RepoWikiView } from '@/components/repo-wiki/RepoWikiView'
 import { ExcalidrawView } from '@/components/excalidraw/ExcalidrawView'
 import { BrowserPanel } from '@/components/browser/BrowserPanel'
 import { FullscreenSidebarToggleBar } from '@/components/app-shell/FullscreenSidebarToggleBar'
+import { PullRequestsView } from '@/components/diff/PullRequestsView'
 import { automationFormAtom } from '@/atoms/automation-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
 import { interfaceVariantAtom } from '@/atoms/theme'
@@ -74,6 +75,7 @@ export function MainArea(): React.ReactElement {
     || activeView === 'excalidraw-gallery'
     || activeView === 'excalidraw-editor'
     || activeView === 'browser'
+    || activeView === 'pull-requests'
 
   // Tab 内容渲染降级为非紧急：TabBar 立即高亮新 tab，主区域昂贵渲染（含 PreviewPanel 中
   // DiffTabContent → ProseMirror editor mount + Shiki tokenize）让出主线程，避免点击 tab
@@ -284,6 +286,9 @@ export function MainArea(): React.ReactElement {
             ) : activeView === 'browser' ? (
               // 内嵌浏览器（synara 移植）：Agent 浏览器面板，全屏取代 TabBar + TabContent
               <BrowserPanel />
+            ) : activeView === 'pull-requests' ? (
+              // Pull Requests：列出当前工作区 open PR，全屏取代 TabBar + TabContent
+              <PullRequestsView />
             ) : (
               <>
                 <TabBar />
