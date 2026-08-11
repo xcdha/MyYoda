@@ -70,6 +70,10 @@ import {
   initializeMarkdownFontSize,
 } from './atoms/markdown-font-size'
 import {
+  typographySettingsAtom,
+  initializeTypographySettings,
+} from './atoms/typography-settings'
+import {
   sidebarModuleCollapsedMapAtom,
   initializeSidebarModuleCollapsed,
 } from './atoms/sidebar-module-atoms'
@@ -758,10 +762,12 @@ function UiPreferencesInitializer(): null {
  */
 function MarkdownFontSizeInitializer(): null {
   const setMarkdownFontSize = useSetAtom(markdownFontSizeAtom)
+  const setTypography = useSetAtom(typographySettingsAtom)
 
   useEffect(() => {
     initializeMarkdownFontSize(setMarkdownFontSize)
-  }, [setMarkdownFontSize])
+    initializeTypographySettings(setTypography)
+  }, [setMarkdownFontSize, setTypography])
 
   return null
 }

@@ -29,6 +29,7 @@ import {
   applyInterfaceVariantToDOM,
 } from '@/atoms/theme'
 import { markdownFontSizeAtom, updateMarkdownFontSize } from '@/atoms/markdown-font-size'
+import { typographySettingsAtom, updateTypographySettings, TYPOGRAPHY_LIMITS } from '@/atoms/typography-settings'
 import { previewModePreferenceAtom, type PreviewModePreference } from '@/atoms/preview-atoms'
 import { cn } from '@/lib/utils'
 import type { InterfaceVariant, MarkdownFontSize, ThemeMode, ThemePack, ThemeStyle, ThemeVariant } from '../../../types'
@@ -57,6 +58,18 @@ const MARKDOWN_FONT_SIZE_OPTIONS = [
   { value: 'small', label: '小' },
   { value: 'medium', label: '中' },
   { value: 'large', label: '大' },
+]
+
+/** 预设文字颜色（浅色/深色主题都可用） */
+const TEXT_COLOR_PRESETS = [
+  { name: '跟随主题', value: '' },
+  { name: '暖黑', value: '#2a2622' },
+  { name: '石青', value: '#1f4e5f' },
+  { name: '赭红', value: '#9a3b2e' },
+  { name: '苔绿', value: '#3d5a3d' },
+  { name: '暖白', value: '#f4f1ec' },
+  { name: '雾灰', value: '#a89880' },
+  { name: '淡紫', value: '#b7a4d4' },
 ]
 
 const PREVIEW_MODE_OPTIONS: { value: PreviewModePreference; label: string }[] = [
@@ -95,6 +108,7 @@ export function AppearanceSettings(): React.ReactElement {
   const systemIsDark = useAtomValue(systemIsDarkAtom)
   const [markdownFontSize, setMarkdownFontSize] = useAtom(markdownFontSizeAtom)
   const [previewModePref, setPreviewModePref] = useAtom(previewModePreferenceAtom)
+  const [typography, setTypography] = useAtom(typographySettingsAtom)
   const isCustomActive = themeMode === 'special' && themeStyle === 'custom'
   // "主题模式"标签不再单列"主题风格"选项：选中某个预设时 themeMode 内部仍是 'special'
   // （legacy 主题的 CSS class 应用逻辑依赖这个值），标签显示哪个变体则由 themeActiveVariantAtom
@@ -230,7 +244,67 @@ export function AppearanceSettings(): React.ReactElement {
           ) : null}
 
           <SettingsRow label="界面缩放" description={ZOOM_HINT} />
-          <SettingsSegmentedControl label="Markdown 字号" description="调整 AI 回复与 Markdown 编辑器的正文字号" value={markdownFontSize} onValueChange={(value) => { const next = value as MarkdownFontSize; setMarkdownFontSize(next); void updateMarkdownFontSize(next) }} options={MARKDOWN_FONT_SIZE_OPTIONS} />
+          <SettingsSegmentedControl label="Markdown 字号" description="调整 AI 回复与 Markdown 编辑器的正文字号档位" value={markdownFontSize} onValueChange={(value) => { const next = value as MarkdownFontSize; setMarkdownFontSize(next); void updateMarkdownFontSize(next) }} options={MARKDOWN_FONT_SIZE_OPTIONS} />
+
+          <div className="border-t border-border px-4 py-4 space-y-4">
+            <div>
+              <div className="text-xs font-medium text-foreground">正文排版</div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">精细调节 AI 回复与 Markdown 编辑器的字号、行距、字距与文字颜色（即时生效）</div>
+            </div>
+
+            <TypographySlider
+              label="字号"
+              unit="px"
+              min={TYPOGRAPHY_LIMITS.fontSize.min}
+              max={TYPOGRAPHY_LIMITS.fontSize.max}
+              step={1}
+              value={typography.fontSize ?? 15}
+              onChange={(v) => { setTypography({ ...typography, fontSize: v }); void updateTypographySettings({ ...typography, fontSize: v }) }}
+            />
+            <TypographySlider
+              label="行距"
+              unit="×"
+              min={TYPOGRAPHY_LIMITS.lineHeight.min}
+              max={TYPOGRAPHY_LIMITS.lineHeight.max}
+              step={0.05}
+              value={typography.lineHeight ?? 1.65}
+              onChange={(v) => { setTypography({ ...typography, lineHeight: v }); void updateTypographySettings({ ...typography, lineHeight: v }) }}
+            />
+            <TypographySlider
+              label="字距"
+              unit="px"
+              min={TYPOGRAPHY_LIMITS.letterSpacing.min}
+              max={TYPOGRAPHY_LIMITS.letterSpacing.max}
+              step={0.1}
+              value={typography.letterSpacing ?? 0}
+              onChange={(v) => { setTypography({ ...typography, letterSpacing: v }); void updateTypographySettings({ ...typography, letterSpacing: v }) }}
+            />
+
+            <div>
+              <div className="mb-2 text-[11px] font-medium text-muted-foreground">正文颜色</div>
+              <div className="flex flex-wrap items-center gap-2">
+                {TEXT_COLOR_PRESETS.map((preset) => {
+                  const isActive = (typography.textColor ?? '') === preset.value
+                  return (
+                    <button
+                      key={preset.name}
+                      type="button"
+                      title={preset.name}
+                      onClick={() => { const next = { ...typography, textColor: preset.value || undefined }; setTypography(next); void updateTypographySettings(next) }}
+                      className={cn(
+                        'flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-medium transition-colors',
+                        isActive ? 'border-primary bg-primary/10 text-foreground' : 'border-border text-muted-foreground hover:border-foreground/30 hover:text-foreground',
+                      )}
+                    >
+                      <span className="size-3.5 rounded-full border border-border/60" style={{ background: preset.value || 'conic-gradient(#666, #999, #666)' }} />
+                      {preset.name}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+
           <SettingsSegmentedControl label="Agent 预览展开方式" description="点击文件、工具结果「预览」按钮时的默认展开位置" value={previewModePref} onValueChange={(value) => setPreviewModePref(value as PreviewModePreference)} options={PREVIEW_MODE_OPTIONS} />
         </SettingsCard>
       </SettingsSection>
@@ -298,5 +372,47 @@ function PresetCard({ preset, pack, isSelected, onSelect }: { preset: CraftTheme
       </span>
       {isSelected ? <Check className="size-3 shrink-0 text-primary" /> : null}
     </button>
+  )
+}
+
+/**
+ * 排版滑块：标签 + 当前值 + range 输入。
+ * 值即时写入 CSS 变量（原子 + updateTypographySettings 持久化）。
+ */
+function TypographySlider({
+  label,
+  unit,
+  min,
+  max,
+  step,
+  value,
+  onChange,
+}: {
+  label: string
+  unit: string
+  min: number
+  max: number
+  step: number
+  value: number
+  onChange: (value: number) => void
+}): React.ReactElement {
+  return (
+    <div className="flex items-center gap-3">
+      <span className="w-8 shrink-0 text-[11px] font-medium text-muted-foreground">{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        aria-label={label}
+        onChange={(event) => onChange(Number(event.target.value))}
+        className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-muted accent-primary"
+      />
+      <span className="w-12 shrink-0 text-right text-[11px] tabular-nums text-foreground">
+        {Number.isInteger(value) ? value : value.toFixed(2)}
+        {unit}
+      </span>
+    </div>
   )
 }

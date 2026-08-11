@@ -308,19 +308,31 @@ export function getMainWindow(): BrowserWindow | null {
   return getStoredMainWindow()
 }
 
+/**
+ * Windows 键盘缩放兜底。
+ *
+ * 背景：菜单加速键 `CmdOrCtrl+-` / `CmdOrCtrl+0` 在 Windows 上与主键盘布局
+ * 常不匹配（- 键可能上报为 '-'/'_'、0 键上报为 '0' 或小键盘 'num0'），导致
+ * 菜单缩放快捷键失效；而 Ctrl+= 放大已有专门兜底。这里统一补齐三个方向的
+ * 兜底：Ctrl+- 缩小、Ctrl+= 放大、Ctrl+0 重置（100%）。
+ */
 function installWindowsZoomInFallback(win: BrowserWindow): void {
   if (process.platform !== 'win32') return
 
   win.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown' || !input.control || input.alt || input.meta) return
 
-    // Windows 下主键盘的 Ctrl++ 常会以 Ctrl+= 上报；小键盘加号也需要兜底。
+    // Windows 下主键盘的 Ctrl++ 常以 Ctrl+= 上报；小键盘 +/-/* 以 numadd/numsub 上报。
     const key = input.key.toLowerCase()
-    if (!['=', '+', 'numadd', 'add'].includes(key)) return
+    const isZoomIn = ['=', '+', 'numadd', 'add'].includes(key)
+    const isZoomOut = ['-', '_', 'numsub', 'subtract'].includes(key)
+    const isZoomReset = ['0', 'num0'].includes(key)
+    if (!isZoomIn && !isZoomOut && !isZoomReset) return
 
     event.preventDefault()
     const currentZoomLevel = win.webContents.getZoomLevel()
-    win.webContents.setZoomLevel(Math.min(currentZoomLevel + 0.5, 9))
+    const nextLevel = isZoomReset ? 0 : isZoomIn ? Math.min(currentZoomLevel + 0.5, 9) : Math.max(currentZoomLevel - 0.5, -8)
+    win.webContents.setZoomLevel(nextLevel)
     win.webContents.send(IPC_CHANNELS.WINDOW_ZOOM_FACTOR_CHANGED, win.webContents.getZoomFactor())
   })
 }

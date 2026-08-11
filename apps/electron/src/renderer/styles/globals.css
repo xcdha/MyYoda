@@ -18,6 +18,11 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  /* 正文排版精细调节（AI 回复 + Markdown 编辑器），由 typography-settings.ts 动态覆盖 */
+  --md-body-font-size: 15px;
+  --md-body-line-height: 1.65;
+  --md-body-letter-spacing: 0px;
+  --md-body-color: inherit;
 }
 
 /* CRT Terminal 主题：全局等宽字体覆盖 */
