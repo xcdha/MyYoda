@@ -74,6 +74,10 @@ import {
   initializeTypographySettings,
 } from './atoms/typography-settings'
 import {
+  areaStylesAtom,
+  initializeAreaStyles,
+} from './atoms/area-styles'
+import {
   sidebarModuleCollapsedMapAtom,
   initializeSidebarModuleCollapsed,
 } from './atoms/sidebar-module-atoms'
@@ -756,18 +760,21 @@ function UiPreferencesInitializer(): null {
 }
 
 /**
- * Markdown 字号初始化组件
+ * Markdown 字号 / 排版 / 区域样式初始化组件
  *
- * 从主进程加载字号档位，写入 :root CSS 变量驱动 Markdown 预览。
+ * 从主进程加载字号档位、正文排版与按区域字体/颜色设置，
+ * 写入 :root CSS 变量驱动渲染。
  */
 function MarkdownFontSizeInitializer(): null {
   const setMarkdownFontSize = useSetAtom(markdownFontSizeAtom)
   const setTypography = useSetAtom(typographySettingsAtom)
+  const setAreaStyles = useSetAtom(areaStylesAtom)
 
   useEffect(() => {
     initializeMarkdownFontSize(setMarkdownFontSize)
     initializeTypographySettings(setTypography)
-  }, [setMarkdownFontSize, setTypography])
+    initializeAreaStyles(setAreaStyles)
+  }, [setMarkdownFontSize, setTypography, setAreaStyles])
 
   return null
 }

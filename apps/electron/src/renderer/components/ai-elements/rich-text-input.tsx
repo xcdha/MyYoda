@@ -975,6 +975,7 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
       onKeyUpCapture={(event) => forwardSessionQuickSwitchKeyEvent(event, 'keyup')}
       className={cn(
         'rich-text-input relative w-full overflow-y-auto overscroll-contain scrollbar-thin transition-[max-height] duration-base ease-out',
+        'text-[length:var(--area-input-font-size)] text-[color:var(--area-input-color)]',
         isManuallyCollapsed
           ? 'max-h-[101px]'
           : isExpanded ? 'max-h-[500px]' : 'max-h-[200px]',

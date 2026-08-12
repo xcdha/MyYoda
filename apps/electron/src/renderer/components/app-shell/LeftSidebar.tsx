@@ -2602,7 +2602,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
         ref={sidebarRootRef}
         data-session-switch-hints={quickSwitchHintsVisible ? 'true' : undefined}
         className={cn(
-          'refined-sidebar relative h-full flex flex-col items-center px-2',
+          'refined-sidebar relative h-full flex flex-col items-center px-2 text-[length:var(--area-ui-font-size)] text-[color:var(--area-ui-color)]',
           !noTransition && 'transition-[width] duration-slow ease-out',
           isClassic
             ? 'bg-background rounded-2xl shadow-xl dark:shadow-md'

@@ -7,7 +7,7 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { getSettingsPath } from './config-paths'
-import { DEFAULT_AGENT_RUNTIME, DEFAULT_INTERFACE_VARIANT, DEFAULT_THEME_MODE, DEFAULT_TYPOGRAPHY_SETTINGS } from '../../types'
+import { DEFAULT_AGENT_RUNTIME, DEFAULT_AREA_STYLES, DEFAULT_INTERFACE_VARIANT, DEFAULT_THEME_MODE, DEFAULT_TYPOGRAPHY_SETTINGS } from '../../types'
 import type { AppSettings } from '../../types'
 
 /**
@@ -37,6 +37,7 @@ export function getSettings(): AppSettings {
       defaultThinkingLevel: 'high',
       gitAttributionEnabled: true,
       typography: DEFAULT_TYPOGRAPHY_SETTINGS,
+      areaStyles: DEFAULT_AREA_STYLES,
     }
   }
 
@@ -65,6 +66,7 @@ export function getSettings(): AppSettings {
       // 缺省 true：老配置文件未写该字段时保持推广默认开启
       gitAttributionEnabled: settings.gitAttributionEnabled ?? true,
       typography: settings.typography ?? DEFAULT_TYPOGRAPHY_SETTINGS,
+      areaStyles: settings.areaStyles ?? DEFAULT_AREA_STYLES,
     }
   } catch (error) {
     console.error('[设置] 读取失败:', error)
@@ -86,6 +88,7 @@ export function getSettings(): AppSettings {
       defaultThinkingLevel: 'high',
       gitAttributionEnabled: true,
       typography: DEFAULT_TYPOGRAPHY_SETTINGS,
+      areaStyles: DEFAULT_AREA_STYLES,
     }
   }
 }

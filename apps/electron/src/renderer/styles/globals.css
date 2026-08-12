@@ -23,6 +23,15 @@
   --md-body-line-height: 1.65;
   --md-body-letter-spacing: 0px;
   --md-body-color: inherit;
+  /* 区域样式（界面/正文/输入框/代码块），由 area-styles.ts 动态覆盖；默认跟随主题 */
+  --area-ui-font-size: inherit;
+  --area-ui-color: inherit;
+  --area-body-font-size: inherit;
+  --area-body-color: inherit;
+  --area-input-font-size: inherit;
+  --area-input-color: inherit;
+  --area-code-font-size: inherit;
+  --area-code-color: inherit;
 }
 
 /* CRT Terminal 主题：全局等宽字体覆盖 */

@@ -118,10 +118,12 @@ export default function App(): React.ReactElement {
   // 显示主界面
   return (
     <TooltipProvider delayDuration={200}>
-      <AppShell contextValue={contextValue} />
-      <TutorialBanner />
-      <GlobalEnvironmentCheckDialog />
-      <MigrationImportDialog />
+      <div className="h-full text-[length:var(--area-ui-font-size)] text-[color:var(--area-ui-color)]">
+        <AppShell contextValue={contextValue} />
+        <TutorialBanner />
+        <GlobalEnvironmentCheckDialog />
+        <MigrationImportDialog />
+      </div>
     </TooltipProvider>
   )
 }

@@ -30,9 +30,11 @@ import {
 } from '@/atoms/theme'
 import { markdownFontSizeAtom, updateMarkdownFontSize } from '@/atoms/markdown-font-size'
 import { typographySettingsAtom, updateTypographySettings, TYPOGRAPHY_LIMITS } from '@/atoms/typography-settings'
+import { areaStylesAtom, updateAreaStyle, resetAreaStyle } from '@/atoms/area-styles'
 import { previewModePreferenceAtom, type PreviewModePreference } from '@/atoms/preview-atoms'
 import { cn } from '@/lib/utils'
-import type { InterfaceVariant, MarkdownFontSize, ThemeMode, ThemePack, ThemeStyle, ThemeVariant } from '../../../types'
+import type { InterfaceVariant, MarkdownFontSize, StyleAreaId, ThemeMode, ThemePack, ThemeStyle, ThemeVariant } from '../../../types'
+import { AREA_FONT_SIZE_LIMITS, AREA_LABELS } from '../../../types'
 import { CRAFT_THEME_PRESETS, getCraftThemePack, type CraftThemePreset } from '@/theme/theme.logic'
 
 import themeCloudDancer from '@/assets/theme-previews/theme-cloud-dancer.webp'
@@ -109,6 +111,7 @@ export function AppearanceSettings(): React.ReactElement {
   const [markdownFontSize, setMarkdownFontSize] = useAtom(markdownFontSizeAtom)
   const [previewModePref, setPreviewModePref] = useAtom(previewModePreferenceAtom)
   const [typography, setTypography] = useAtom(typographySettingsAtom)
+  const [areaStyles, setAreaStyles] = useAtom(areaStylesAtom)
   const isCustomActive = themeMode === 'special' && themeStyle === 'custom'
   // "主题模式"标签不再单列"主题风格"选项：选中某个预设时 themeMode 内部仍是 'special'
   // （legacy 主题的 CSS class 应用逻辑依赖这个值），标签显示哪个变体则由 themeActiveVariantAtom
@@ -259,7 +262,7 @@ export function AppearanceSettings(): React.ReactElement {
               max={TYPOGRAPHY_LIMITS.fontSize.max}
               step={1}
               value={typography.fontSize ?? 15}
-              onChange={(v) => { setTypography({ ...typography, fontSize: v }); void updateTypographySettings({ ...typography, fontSize: v }) }}
+              onChange={async (v) => setTypography(await updateTypographySettings({ fontSize: v }))}
             />
             <TypographySlider
               label="行距"
@@ -268,7 +271,7 @@ export function AppearanceSettings(): React.ReactElement {
               max={TYPOGRAPHY_LIMITS.lineHeight.max}
               step={0.05}
               value={typography.lineHeight ?? 1.65}
-              onChange={(v) => { setTypography({ ...typography, lineHeight: v }); void updateTypographySettings({ ...typography, lineHeight: v }) }}
+              onChange={async (v) => setTypography(await updateTypographySettings({ lineHeight: v }))}
             />
             <TypographySlider
               label="字距"
@@ -277,7 +280,7 @@ export function AppearanceSettings(): React.ReactElement {
               max={TYPOGRAPHY_LIMITS.letterSpacing.max}
               step={0.1}
               value={typography.letterSpacing ?? 0}
-              onChange={(v) => { setTypography({ ...typography, letterSpacing: v }); void updateTypographySettings({ ...typography, letterSpacing: v }) }}
+              onChange={async (v) => setTypography(await updateTypographySettings({ letterSpacing: v }))}
             />
 
             <div>
@@ -290,7 +293,7 @@ export function AppearanceSettings(): React.ReactElement {
                       key={preset.name}
                       type="button"
                       title={preset.name}
-                      onClick={() => { const next = { ...typography, textColor: preset.value || undefined }; setTypography(next); void updateTypographySettings(next) }}
+                      onClick={async () => setTypography(await updateTypographySettings({ textColor: preset.value || undefined }))}
                       className={cn(
                         'flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-medium transition-colors',
                         isActive ? 'border-primary bg-primary/10 text-foreground' : 'border-border text-muted-foreground hover:border-foreground/30 hover:text-foreground',
@@ -303,6 +306,33 @@ export function AppearanceSettings(): React.ReactElement {
                 })}
               </div>
             </div>
+          </div>
+
+          {/* 按区域自定义字体与颜色 */}
+          <div className="border-t border-border px-4 py-4 space-y-4">
+            <div>
+              <div className="text-xs font-medium text-foreground">区域字体与颜色</div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">按区域自定义界面文字、对话正文、输入框与代码块的字体大小和颜色（即时生效）</div>
+            </div>
+            {(Object.keys(AREA_LABELS) as StyleAreaId[]).map((area) => (
+              <AreaStyleEditor
+                key={area}
+                area={area}
+                label={AREA_LABELS[area]}
+                value={areaStyles[area] ?? {}}
+                onChange={async (partial) => setAreaStyles(await updateAreaStyle(area, partial))}
+                onReset={async () => setAreaStyles(await resetAreaStyle(area))}
+              />
+            ))}
+          </div>
+
+          {/* 实时预览 */}
+          <div className="border-t border-border px-4 py-4 space-y-3">
+            <div>
+              <div className="text-xs font-medium text-foreground">实时预览</div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">以下内容随上方字体/颜色/排版设置即时变化，与实际渲染一致</div>
+            </div>
+            <StylePreview />
           </div>
 
           <SettingsSegmentedControl label="Agent 预览展开方式" description="点击文件、工具结果「预览」按钮时的默认展开位置" value={previewModePref} onValueChange={(value) => setPreviewModePref(value as PreviewModePreference)} options={PREVIEW_MODE_OPTIONS} />
@@ -413,6 +443,138 @@ function TypographySlider({
         {Number.isInteger(value) ? value : value.toFixed(2)}
         {unit}
       </span>
+    </div>
+  )
+}
+
+/**
+ * 单个区域的字体/颜色编辑器：字号滑块 + 颜色预设 + 重置。
+ */
+function AreaStyleEditor({
+  area,
+  label,
+  value,
+  onChange,
+  onReset,
+}: {
+  area: StyleAreaId
+  label: string
+  value: { fontSize?: number; color?: string }
+  onChange: (partial: { fontSize?: number; color?: string }) => void
+  onReset: () => void
+}): React.ReactElement {
+  const fontSize = value.fontSize
+  const color = value.color
+  return (
+    <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-[11px] font-medium text-foreground">{label}</span>
+        {(fontSize != null || color) && (
+          <button
+            type="button"
+            onClick={onReset}
+            className="rounded px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
+          >
+            重置
+          </button>
+        )}
+      </div>
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <span className="w-7 shrink-0 text-[10px] text-muted-foreground">字号</span>
+          <input
+            type="range"
+            min={AREA_FONT_SIZE_LIMITS.min}
+            max={AREA_FONT_SIZE_LIMITS.max}
+            step={1}
+            value={fontSize ?? 14}
+            aria-label={`${label}字号`}
+            onChange={(event) => onChange({ fontSize: Number(event.target.value) })}
+            className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-muted accent-primary"
+          />
+          <span className="w-9 shrink-0 text-right text-[10px] tabular-nums text-foreground">
+            {fontSize != null ? `${fontSize}px` : '默认'}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {TEXT_COLOR_PRESETS.map((preset) => {
+            const isActive = (color ?? '') === preset.value
+            return (
+              <button
+                key={preset.name}
+                type="button"
+                title={`${label} · ${preset.name}`}
+                aria-label={`${label}颜色：${preset.name}`}
+                onClick={() => onChange({ color: preset.value || undefined })}
+                className={cn(
+                  'size-5 rounded-full border transition-transform hover:scale-110',
+                  isActive ? 'border-primary ring-2 ring-primary/30' : 'border-border/70',
+                )}
+                style={{ background: preset.value || 'conic-gradient(#999, #666, #999)' }}
+              />
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 实时预览面板：模拟 MyYoda 主界面布局（侧边栏 + 对话正文 + 输入框 + 代码块），
+ * 全部通过 var() 读取当前设置的 CSS 变量，随上方设置即时更新。
+ */
+function StylePreview(): React.ReactElement {
+  return (
+    <div className="overflow-hidden rounded-xl border border-border/70 bg-content-area shadow-sm">
+      {/* 模拟窗口标题栏 */}
+      <div className="flex items-center gap-1.5 border-b border-border/60 px-3 py-2">
+        <span className="size-2.5 rounded-full bg-[#ff5f57]" />
+        <span className="size-2.5 rounded-full bg-[#febc2e]" />
+        <span className="size-2.5 rounded-full bg-[#28c840]" />
+        <span className="ml-2 text-[10px] text-muted-foreground">MyYoda · 预览</span>
+      </div>
+
+      <div className="flex h-[220px]">
+        {/* 模拟侧边栏（ui 区域） */}
+        <div className="flex w-14 shrink-0 flex-col items-center gap-2 border-r border-border/60 bg-[hsl(var(--sidebar-surface))] py-3 text-[length:var(--area-ui-font-size)] text-[color:var(--area-ui-color)]">
+          <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-[11px] font-semibold">Y</span>
+          <span className="flex size-8 items-center justify-center rounded-lg bg-foreground/5 text-[11px]">⌘</span>
+          <span className="flex size-8 items-center justify-center rounded-lg bg-foreground/5 text-[11px]">⚙</span>
+        </div>
+
+        {/* 模拟内容区 */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="min-h-0 flex-1 space-y-2 overflow-hidden px-3 py-3">
+            {/* 模拟 AI 回复（body 区域） */}
+            <div className="max-w-[85%] rounded-xl rounded-tl-sm bg-muted/60 px-3 py-2 text-[length:var(--area-body-font-size)] leading-[var(--md-body-line-height)] tracking-[var(--md-body-letter-spacing)] text-[color:var(--md-body-color)]">
+              <p className="text-[10px] text-muted-foreground">AI 回复</p>
+              <p>这是对话正文的实时预览，字号、行距、字距与颜色会随左侧设置即时变化。</p>
+            </div>
+            {/* 模拟代码块（code 区域） */}
+            <div className="overflow-hidden rounded-lg border border-border/60">
+              <div className="flex items-center justify-between bg-muted/60 px-2 py-1 text-[9px] text-muted-foreground">
+                <span>typescript</span>
+                <span>复制</span>
+              </div>
+              <pre
+                className="m-0 overflow-x-auto bg-[hsl(var(--code-bg))] px-3 py-2 text-[length:var(--area-code-font-size)] leading-[1.6]"
+                style={{ color: 'var(--area-code-color, #e1e4e8)' }}
+              >
+                <code>{`const greet = (name: string) => \`你好, \${name}\``}</code>
+              </pre>
+            </div>
+          </div>
+
+          {/* 模拟输入框（input 区域） */}
+          <div className="border-t border-border/60 px-3 py-2.5 text-[length:var(--area-input-font-size)] text-[color:var(--area-input-color)]">
+            <div className="rounded-lg border border-border/70 bg-background px-3 py-2">
+              <span className="text-[11px] text-muted-foreground">输入消息…</span>
+              <span className="ml-2 text-[10px] text-muted-foreground/60">Ctrl+Enter 发送</span>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

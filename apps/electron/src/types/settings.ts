@@ -356,9 +356,10 @@ export const DEFAULT_MARKDOWN_FONT_SIZE: MarkdownFontSize = 'small'
 /**
  * 正文字体排版设置（作用于 AI 回复与 Markdown 编辑器）。
  * 独立于 MarkdownFontSize 档位：档位提供快捷切换，此处提供精细调节。
+ * fontSize 为 undefined 时跟随 MarkdownFontSize 档位。
  */
 export interface TypographySettings {
-  /** 正文字号（px，默认 15，范围 12~24） */
+  /** 正文字号（px，undefined = 跟随 Markdown 字号档位；范围 12~24） */
   fontSize?: number
   /** 行距倍率（默认 1.65，范围 1.2~2.4） */
   lineHeight?: number
@@ -368,12 +369,48 @@ export interface TypographySettings {
   textColor?: string
 }
 
-/** 默认排版设置 */
+/** 默认排版设置（fontSize undefined = 跟随档位） */
 export const DEFAULT_TYPOGRAPHY_SETTINGS: TypographySettings = {
-  fontSize: 15,
+  fontSize: undefined,
   lineHeight: 1.65,
   letterSpacing: 0,
   textColor: undefined,
+}
+
+/** 可自定义样式的 UI 区域 */
+export type StyleAreaId = 'ui' | 'body' | 'input' | 'code'
+
+/** 单个区域的字体/颜色设置（所有字段可选，undefined = 跟随主题默认） */
+export interface AreaStyleSettings {
+  /** 区域字号（px） */
+  fontSize?: number
+  /** 区域文字颜色（CSS 颜色值） */
+  color?: string
+}
+
+/** 按区域划分的字体/颜色自定义设置 */
+export type AreaStyleMap = Partial<Record<StyleAreaId, AreaStyleSettings>>
+
+/** 区域显示名（设置页 UI） */
+export const AREA_LABELS: Record<StyleAreaId, string> = {
+  ui: '界面文字',
+  body: '对话正文',
+  input: '输入框',
+  code: '代码块',
+}
+
+/** 区域字号应用范围（px） */
+export const AREA_FONT_SIZE_LIMITS = { min: 11, max: 26 } as const
+
+/** 默认区域样式（全部跟随主题） */
+export const DEFAULT_AREA_STYLES: AreaStyleMap = {}
+
+/** 区域样式 → CSS 变量映射（applyAreaStylesToDOM 使用） */
+export const AREA_CSS_VARIABLES: Record<StyleAreaId, { fontSize: string; color: string }> = {
+  ui: { fontSize: '--area-ui-font-size', color: '--area-ui-color' },
+  body: { fontSize: '--area-body-font-size', color: '--area-body-color' },
+  input: { fontSize: '--area-input-font-size', color: '--area-input-color' },
+  code: { fontSize: '--area-code-font-size', color: '--area-code-color' },
 }
 
 /** CodeClaw 桌面助手偏好。 */
@@ -474,6 +511,8 @@ export interface AppSettings {
   markdownFontSize?: MarkdownFontSize
   /** 正文排版精细调节（AI 回复 + Markdown 编辑器；空值回落档位默认） */
   typography?: TypographySettings
+  /** 按区域自定义字体/颜色（界面/正文/输入框/代码块） */
+  areaStyles?: AreaStyleMap
   /** 上次是否在 Scratch Pad 页（用于重启恢复） */
   scratchPadActive?: boolean
   /** 应用图标变体 ID（dock + window icon），'default' 或 logo 变体 id */
