@@ -24,7 +24,9 @@
   --md-body-letter-spacing: 0px;
   --md-body-color: inherit;
   /* 区域样式（界面/正文/输入框/代码块），由 area-styles.ts 动态覆盖；默认跟随主题 */
-  --area-ui-font-size: inherit;
+  /* 界面字号基准：Tailwind text-* 类以 rem 为单位（1rem = 14px 基准），
+     用户设置 --area-ui-font-size 后按比例缩放所有界面文字 */
+  --area-ui-font-size: 14px;
   --area-ui-color: inherit;
   --area-body-font-size: inherit;
   --area-body-color: inherit;
@@ -33,6 +35,46 @@
   --area-code-font-size: inherit;
   --area-code-color: inherit;
 }
+
+/* ===== UI 区域字号跟随 --area-ui-font-size =====
+ * Tailwind 的 text-xs/sm/base 及各 text-[Npx] 任意值类是显式字号，
+ * 会覆盖父级 font-size 继承——因此根容器上的 font-size 对大部分
+ * 界面文字不生效。这里在 .app-ui-area 容器内按比例重新计算这些类，
+ * 使「界面文字」设置能实际缩放全部 UI 文本。
+ * 基准 14px = 默认 text-sm，比例 = var(--area-ui-font-size) / 14px。
+ *
+ * 通过 :not() 排除内容区容器（对话正文/编辑器/输入框/代码块/终端），
+ * 这些区域由各自的区域变量（--md-body-* / --area-input-* / --area-code-*）
+ * 独立驱动，不应被 UI 字号覆盖。
+ */
+.app-ui-area {
+  font-size: var(--area-ui-font-size);
+  color: var(--area-ui-color);
+}
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-\[10px\] { font-size: calc(var(--area-ui-font-size) * 10 / 14); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-\[11px\] { font-size: calc(var(--area-ui-font-size) * 11 / 14); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-\[12px\] { font-size: calc(var(--area-ui-font-size) * 12 / 14); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-\[13px\] { font-size: calc(var(--area-ui-font-size) * 13 / 14); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-\[14px\] { font-size: calc(var(--area-ui-font-size) * 14 / 14); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-\[15px\] { font-size: calc(var(--area-ui-font-size) * 15 / 14); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-xs { font-size: calc(var(--area-ui-font-size) * 0.75); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-sm { font-size: calc(var(--area-ui-font-size) * 0.875); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-base { font-size: var(--area-ui-font-size); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-lg { font-size: calc(var(--area-ui-font-size) * 1.125); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-xl { font-size: calc(var(--area-ui-font-size) * 1.25); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-2xl { font-size: calc(var(--area-ui-font-size) * 1.5); }
+.app-ui-area :not(.rich-text-input):not(.message-response):not(.prose):not(.code-block-wrapper):not(.shiki):not(.markdown-editor):not(.planning-editor):not(.excalidraw-container) .text-3xl { font-size: calc(var(--area-ui-font-size) * 1.875); }
+
+/* 界面文字颜色跟随 --area-ui-color。
+ * 仅在用户显式设置颜色时（.app-ui-area.ui-color-custom）覆盖通用前景色类，
+ * 避免未设置时 color:var() 回落为 inherit 破坏主题色。 */
+.app-ui-area.ui-color-custom .text-foreground { color: var(--area-ui-color); }
+.app-ui-area.ui-color-custom .text-muted-foreground { color: var(--area-ui-color); }
+.app-ui-area.ui-color-custom .text-foreground\/50,
+.app-ui-area.ui-color-custom .text-foreground\/55,
+.app-ui-area.ui-color-custom .text-foreground\/60,
+.app-ui-area.ui-color-custom .text-foreground\/70,
+.app-ui-area.ui-color-custom .text-foreground\/80 { color: var(--area-ui-color); }
 
 /* CRT Terminal 主题：全局等宽字体覆盖 */
 .theme-terminal-dark {

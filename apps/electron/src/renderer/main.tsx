@@ -780,6 +780,31 @@ function MarkdownFontSizeInitializer(): null {
 }
 
 /**
+ * Ctrl/⌘+滚轮缩放监听组件
+ *
+ * 与浏览器行为一致：按住 Ctrl（Windows/Linux）或 Cmd（macOS）滚动滚轮，
+ * 上滑放大 / 下滑缩小。DOM wheel 事件能取到 deltaY 与 ctrlKey/metaKey，
+ * 通过 electronAPI.zoomByDelta 请求主进程缩放（主进程处理后广播新系数）。
+ * 普通滚动（未按修饰键）不拦截，保持默认滚动行为。
+ */
+function WheelZoomListener(): null {
+  useEffect(() => {
+    const handleWheel = (event: WheelEvent): void => {
+      if (!event.ctrlKey && !event.metaKey) return
+      if (event.altKey) return
+      // 仅在主要窗口区域触发，避免影响内嵌浏览器（WebContentsView 的 wheel
+      // 不会冒泡到主 renderer，此处天然隔离）
+      event.preventDefault()
+      window.electronAPI.zoomByDelta(-event.deltaY)
+    }
+    window.addEventListener('wheel', handleWheel, { passive: false })
+    return () => window.removeEventListener('wheel', handleWheel)
+  }, [])
+
+  return null
+}
+
+/**
  * 左栏模块折叠态初始化组件
  *
  * 从主进程加载 settings.json 中的 sidebarModuleCollapsed 映射并写入 atom。
@@ -1245,6 +1270,7 @@ if (isQuickTaskWindow) {
       <React.StrictMode>
         <ThemeInitializer />
         <MarkdownFontSizeInitializer />
+        <WheelZoomListener />
         <DetachedPreviewApp />
         <Toaster position="bottom-right" />
       </React.StrictMode>
@@ -1292,6 +1318,7 @@ if (isQuickTaskWindow) {
       <DockBadgeInitializer />
       <UiPreferencesInitializer />
       <MarkdownFontSizeInitializer />
+      <WheelZoomListener />
       <SidebarModuleInitializer />
       <SessionListPreferenceInitializer />
       <ChatToolsInitializer />

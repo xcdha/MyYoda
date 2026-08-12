@@ -38,6 +38,10 @@ export function applyAreaStylesToDOM(styles: AreaStyleMap): void {
       root.removeProperty(vars.color)
     }
   }
+  // 界面文字颜色：仅当用户显式设置颜色时激活 .app-ui-area 内的颜色覆盖规则，
+  // 避免未设置时 color: var(--area-ui-color) 回落为 inherit 破坏主题色。
+  const uiColor = styles.ui?.color
+  document.querySelector('.app-ui-area')?.classList.toggle('ui-color-custom', Boolean(uiColor))
 }
 
 /** 从主进程加载区域样式并应用 */

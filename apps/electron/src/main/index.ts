@@ -315,6 +315,9 @@ export function getMainWindow(): BrowserWindow | null {
  * 常不匹配（- 键可能上报为 '-'/'_'、0 键上报为 '0' 或小键盘 'num0'），导致
  * 菜单缩放快捷键失效；而 Ctrl+= 放大已有专门兜底。这里统一补齐三个方向的
  * 兜底：Ctrl+- 缩小、Ctrl+= 放大、Ctrl+0 重置（100%）。
+ *
+ * Ctrl/⌘+滚轮缩放：由渲染进程监听 wheel 事件（DOM 事件能取到 deltaY 与
+ * ctrlKey/metaKey），通过 WINDOW_ZOOM_BY_DELTA IPC 请求主进程缩放。
  */
 function installWindowsZoomInFallback(win: BrowserWindow): void {
   if (process.platform !== 'win32') return
