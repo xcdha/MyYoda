@@ -21,6 +21,34 @@ export function getCurrentAreaStyles(): AreaStyleMap {
   return { ...DEFAULT_AREA_STYLES, ...getDefaultStore().get(areaStylesAtom) }
 }
 
+/** 界面文字颜色：仅当用户显式设置颜色时激活 .app-ui-area 内的颜色覆盖规则，
+ * 避免未设置时 color: var(--area-ui-color) 回落为 inherit 破坏主题色。
+ * App 可能因启动加载屏/Onboarding 延迟挂载 .app-ui-area，这里在 DOM 就绪后
+ * 重试一次，并用 MutationObserver 兜底（主界面最终出现时再补一次）。 */
+let uiColorClassApplied = false
+function applyUiColorCustomClass(styles: AreaStyleMap): void {
+  const uiColor = styles.ui?.color
+  const areaEl = document.querySelector('.app-ui-area')
+  if (areaEl) {
+    areaEl.classList.toggle('ui-color-custom', Boolean(uiColor))
+    uiColorClassApplied = true
+    return
+  }
+  // 容器尚未挂载（启动加载屏 / Onboarding）：挂一个一次性 MutationObserver，
+  // 主界面出现时立即补设置，避免用户已保存的界面颜色在重启后丢失。
+  if (uiColorClassApplied) return
+  const observer = new MutationObserver(() => {
+    const el = document.querySelector('.app-ui-area')
+    if (!el) return
+    el.classList.toggle('ui-color-custom', Boolean(uiColor))
+    uiColorClassApplied = true
+    observer.disconnect()
+  })
+  observer.observe(document.body, { childList: true, subtree: true })
+  // 兜底：1.5s 后仍未挂载则放弃观察，避免长期占用。
+  setTimeout(() => observer.disconnect(), 1500)
+}
+
 /** 将区域样式写入 :root CSS 变量 */
 export function applyAreaStylesToDOM(styles: AreaStyleMap): void {
   const root = document.documentElement.style
@@ -38,10 +66,7 @@ export function applyAreaStylesToDOM(styles: AreaStyleMap): void {
       root.removeProperty(vars.color)
     }
   }
-  // 界面文字颜色：仅当用户显式设置颜色时激活 .app-ui-area 内的颜色覆盖规则，
-  // 避免未设置时 color: var(--area-ui-color) 回落为 inherit 破坏主题色。
-  const uiColor = styles.ui?.color
-  document.querySelector('.app-ui-area')?.classList.toggle('ui-color-custom', Boolean(uiColor))
+  applyUiColorCustomClass(styles)
 }
 
 /** 从主进程加载区域样式并应用 */
