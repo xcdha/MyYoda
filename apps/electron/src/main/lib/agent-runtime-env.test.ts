@@ -36,8 +36,7 @@ describe('Agent Windows Shell 运行环境', () => {
       shellKind: 'git-bash',
       shellPath: gitBash.path,
       env: {
-        PROMA_WINDOWS_SHELL: 'git-bash',
-        CLAUDE_CODE_SHELL: gitBash.path,
+        MYYODA_WINDOWS_SHELL: 'git-bash',
       },
     })
   })
@@ -56,9 +55,8 @@ describe('Agent Windows Shell 运行环境', () => {
       wslCommand: 'wsl.exe',
       wslDistro: 'Ubuntu-24.04',
       env: {
-        PROMA_WINDOWS_SHELL: 'wsl',
-        PROMA_WSL_DISTRO: 'Ubuntu-24.04',
-        CLAUDE_CODE_SHELL: 'wsl.exe',
+        MYYODA_WINDOWS_SHELL: 'wsl',
+        MYYODA_WSL_DISTRO: 'Ubuntu-24.04',
       },
     })
   })
@@ -83,9 +81,9 @@ describe('Agent Windows Shell 运行环境', () => {
   test('Given Windows Path 大小写不同 When 合并运行环境 Then 仅保留覆盖后的 PATH', () => {
     const result = mergeRuntimeEnv(
       { Path: 'C:\\Windows\\System32' },
-      { PATH: 'C:\\Proma;C:\\Windows\\System32' },
+      { PATH: 'C:\\MyYoda;C:\\Windows\\System32' },
     )
 
-    expect(result).toEqual({ PATH: 'C:\\Proma;C:\\Windows\\System32' })
+    expect(result).toEqual({ PATH: 'C:\\MyYoda;C:\\Windows\\System32' })
   })
 })

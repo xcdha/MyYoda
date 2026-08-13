@@ -4,6 +4,16 @@ import * as os from 'node:os'
 import { join } from 'node:path'
 import { mockElectronModule } from './__tests__/electron-mock'
 
+// Windows 非开发者模式/非管理员下创建 symlink 会抛 EPERM，此时跳过 symlink 相关测试
+let symlinkSupported = true
+try {
+  const probeDir = mkdtempSync(join(os.tmpdir(), 'myyoda-symlink-probe-'))
+  symlinkSync(join(probeDir, 'missing'), join(probeDir, 'link'), 'dir')
+  rmSync(probeDir, { recursive: true, force: true })
+} catch {
+  symlinkSupported = false
+}
+
 type AgentWorkspaceManager = typeof import('./agent-workspace-manager')
 type ConfigPathsModule = typeof import('./config-paths')
 type ProjectRepositoryModule = typeof import('./project-repository')
@@ -14,7 +24,6 @@ let projectRepositoryModule: ProjectRepositoryModule
 let tempHome: string
 const originalHome = process.env.HOME
 const originalMyyodaDev = process.env.MYYODA_DEV
-const originalPromaDev = process.env.PROMA_DEV
 
 mockElectronModule({
   app: {
@@ -32,7 +41,7 @@ beforeAll(async () => {
   tempHome = mkdtempSync(join(os.tmpdir(), 'myyoda-agent-workspace-manager-'))
   process.env.HOME = tempHome
   delete process.env.MYYODA_DEV
-  process.env.PROMA_DEV = '0'
+  process.env.MYYODA_DEV = '0'
   configPaths = await import('./config-paths')
   manager = await import('./agent-workspace-manager')
   projectRepositoryModule = await import('./project-repository')
@@ -54,11 +63,6 @@ afterAll(() => {
     delete process.env.MYYODA_DEV
   } else {
     process.env.MYYODA_DEV = originalMyyodaDev
-  }
-  if (originalPromaDev === undefined) {
-    delete process.env.PROMA_DEV
-  } else {
-    process.env.PROMA_DEV = originalPromaDev
   }
   rmSync(tempHome, { recursive: true, force: true })
 })
@@ -157,25 +161,64 @@ describe('隐藏容器 Project 已移除', () => {
 })
 
 describe('ensureDefaultWorkspace', () => {
-  test('新建时名称为默认空间，不改已有自定义名称；Default Space 旧名会迁移', () => {
+  test('新建时名称为默认工作区，不改已有自定义名称；Default Space/默认空间旧名会迁移', () => {
     const created = manager.ensureDefaultWorkspace()
     expect(created.slug).toBe('default')
-    expect(created.name).toBe('默认空间')
+    expect(created.name).toBe('默认工作区')
 
     manager.updateAgentWorkspace(created.id, { name: 'Default Space' })
     const migrated = manager.ensureDefaultWorkspace()
     expect(migrated.id).toBe(created.id)
-    expect(migrated.name).toBe('默认空间')
+    expect(migrated.name).toBe('默认工作区')
+
+    manager.updateAgentWorkspace(created.id, { name: '默认空间' })
+    const migratedChineseLegacy = manager.ensureDefaultWorkspace()
+    expect(migratedChineseLegacy.name).toBe('默认工作区')
 
     manager.updateAgentWorkspace(created.id, { name: '我的实验室' })
     const again = manager.ensureDefaultWorkspace()
     expect(again.id).toBe(created.id)
     expect(again.name).toBe('我的实验室')
   })
+
+  test('已有其他工作区占用默认工作区名称时保留默认项的历史名称，避免迁移产生重名', () => {
+    const defaultWorkspace = manager.ensureDefaultWorkspace()
+    manager.updateAgentWorkspace(defaultWorkspace.id, { name: '默认空间' })
+    const existingNamedWorkspace = manager.createAgentWorkspace('默认工作区')
+
+    const migrated = manager.ensureDefaultWorkspace()
+    const workspaces = manager.listAgentWorkspaces()
+
+    expect(migrated.name).toBe('默认空间')
+    expect(workspaces.find((workspace) => workspace.id === existingNamedWorkspace.id)?.name).toBe('默认工作区')
+    expect(workspaces.filter((workspace) => workspace.name === '默认工作区')).toHaveLength(1)
+  })
+})
+
+describe('Agent 工作区删除边界', () => {
+  test('删除工作区只删除 MyYoda 托管目录，不删除项目绑定的外部工作目录', () => {
+    manager.ensureDefaultWorkspace()
+    const workspace = manager.createAgentWorkspace('客户项目')
+    const externalDir = mkdtempSync(join(os.tmpdir(), 'myyoda-external-project-'))
+    const marker = join(externalDir, 'KEEP.txt')
+    writeFileSync(marker, 'keep', 'utf-8')
+
+    projectRepositoryModule.projectRepository.createProject(workspace.id, {
+      name: '外部仓库',
+      workingDirectory: externalDir,
+    })
+    const managedWorkspaceDir = configPaths.getAgentWorkspacePath(workspace.slug)
+
+    manager.deleteAgentWorkspace(workspace.id)
+
+    expect(existsSync(managedWorkspaceDir)).toBe(false)
+    expect(existsSync(marker)).toBe(true)
+    rmSync(externalDir, { recursive: true, force: true })
+  })
 })
 
 describe('Agent 工作区 Skill 扫描', () => {
-  test('Given Skills 目录包含 broken symlink When 获取工作区 Skills Then 跳过坏条目并继续扫描后续 Skill', () => {
+  test.skipIf(!symlinkSupported)('Given Skills 目录包含 broken symlink When 获取工作区 Skills Then 跳过坏条目并继续扫描后续 Skill', () => {
     const workspaceSlug = 'workspace-a'
     const skillsDir = configPaths.getWorkspaceSkillsDir(workspaceSlug)
 

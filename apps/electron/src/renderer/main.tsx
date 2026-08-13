@@ -30,8 +30,6 @@ import {
 import {
   agentChannelIdAtom,
   agentModelIdAtom,
-  agentChannelIdsAtom,
-  agentRuntimeAtom,
   agentWorkspacesAtom,
   agentSessionsAtom,
   currentAgentWorkspaceIdAtom,
@@ -117,9 +115,9 @@ import { FaqDialog } from './components/faq/FaqDialog'
 import { VoiceDictationApp } from './components/voice-dictation/VoiceDictationApp'
 import { TabSwitcher } from './components/tabs/TabSwitcher'
 import { htmlToMarkdown, markdownToHtml } from './lib/markdown-rich-text'
-import { getEnabledClaudeAgentChannelIds } from './lib/agent-channel-selection'
 import { MyYodaLogo } from './lib/model-logo'
 import { initShortcutRegistry, updateShortcutOverrides } from './lib/shortcut-registry'
+import { initializePerformanceMonitor } from './lib/performance-monitor'
 import './styles/globals.css'
 import 'katex/dist/katex.min.css'
 
@@ -136,9 +134,11 @@ const isCodeClawWindow = windowKind === 'codeclaw'
 const isWorkspaceMemoryWindow = windowKind === 'workspace-memory'
 const isMainWindow = !isQuickTaskWindow && !isVoiceDictationIndicatorWindow && !isDetachedPreviewWindow && !isPlanningWindow && !isCodeClawWindow && !isWorkspaceMemoryWindow
 
+initializePerformanceMonitor()
+
 // 仅主窗口禁用页面级滚动；独立浮窗各自管理自己的内容高度和滚动。
 if (isMainWindow) {
-  document.documentElement.classList.add('proma-main-window')
+  document.documentElement.classList.add('myyoda-main-window')
 }
 
 /**
@@ -208,8 +208,6 @@ function ThemeInitializer(): null {
 function AgentSettingsInitializer(): null {
   const setAgentChannelId = useSetAtom(agentChannelIdAtom)
   const setAgentModelId = useSetAtom(agentModelIdAtom)
-  const setAgentChannelIds = useSetAtom(agentChannelIdsAtom)
-  const setAgentRuntime = useSetAtom(agentRuntimeAtom)
   const setAgentWorkspaces = useSetAtom(agentWorkspacesAtom)
   const setCurrentWorkspaceId = useSetAtom(currentAgentWorkspaceIdAtom)
   const bumpCapabilities = useSetAtom(workspaceCapabilitiesVersionAtom)
@@ -254,25 +252,14 @@ function AgentSettingsInitializer(): null {
         store.set(selectedModelAtom, null)
       }
 
-      const defaultAgentRuntime = settings.agentRuntime ?? 'pi'
-      setAgentRuntime(defaultAgentRuntime)
-
-      // 渠道的启用状态是唯一开关：启动时也必须从实际渠道派生 Claude 白名单，
-      // 不能继承旧版独立开关，或把 Pi 专用渠道带入 Claude runtime。
-      const claudeChannelIds = getEnabledClaudeAgentChannelIds(channels)
-      setAgentChannelIds(claudeChannelIds)
+      // Pi-only：Claude runtime 已退役，不再派生 Agent 渠道白名单。
 
       const selectedChannel = settings.agentChannelId
         ? channels.find((channel) => channel.id === settings.agentChannelId)
         : undefined
       const selectedChannelIsUsable = selectedChannel?.enabled
-        && (defaultAgentRuntime === 'pi' || claudeChannelIds.includes(selectedChannel.id))
 
       const updates: Parameters<typeof window.electronAPI.updateSettings>[0] = {}
-      const storedClaudeChannelIds = settings.agentChannelIds ?? []
-      const whitelistChanged = claudeChannelIds.length !== storedClaudeChannelIds.length
-        || claudeChannelIds.some((id, index) => id !== storedClaudeChannelIds[index])
-      if (whitelistChanged) updates.agentChannelIds = claudeChannelIds
 
       // 验证并加载 Agent 默认渠道/模型。Claude runtime 不能恢复到 Pi 专用或已禁用渠道。
       if (settings.agentChannelId && selectedChannelIsUsable) {
@@ -325,7 +312,7 @@ function AgentSettingsInitializer(): null {
       console.error(err)
       setAgentSettingsReady(true) // 即使出错也标记就绪，避免永远阻塞
     })
-  }, [setAgentChannelId, setAgentModelId, setAgentChannelIds, setAgentRuntime, setAgentWorkspaces, setCurrentWorkspaceId, setThinking, setEffort, setMaxBudget, setMaxTurns, setAutomationGroupOrder, setChannels, setChannelsLoaded, setAgentSettingsReady])
+  }, [setAgentChannelId, setAgentModelId, setAgentWorkspaces, setCurrentWorkspaceId, setThinking, setEffort, setMaxBudget, setMaxTurns, setAutomationGroupOrder, setChannels, setChannelsLoaded, setAgentSettingsReady])
 
   // 工作区切换时重置能力缓存，预加载基线
   useEffect(() => {

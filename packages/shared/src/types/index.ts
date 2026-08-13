@@ -18,11 +18,15 @@ export * from './channel'
 // 代理配置相关类型
 export * from './proxy'
 
+// Pull Request 相关类型（本机 gh CLI）
+export * from './pr'
+
 // Chat 相关类型
 export * from './chat'
 
 // Agent 相关类型
 export * from './agent'
+export * from './browser'
 export * from './reasoning-profile'
 
 // Agent Provider 适配器接口
@@ -36,9 +40,6 @@ export * from './installer'
 
 // GitHub Release 相关类型
 export * from './github'
-
-// Pull Request 相关类型与 IPC 通道
-export * from './pr'
 
 // 本地化版本历史（Release Notes）相关类型
 export * from './release-notes'
@@ -65,9 +66,6 @@ export * from './planning'
 
 // Agent 专家包 IPC 通道
 export { EXPERT_IPC_CHANNELS } from '../experts/channels'
-
-// 内嵌浏览器（synara 移植）类型与 IPC 通道
-export * from './browser'
 
 // Projects 相关类型（仅类型，避免 renderer 引入 Node.js 文件存储实现）
 export type * from '../projects/types'

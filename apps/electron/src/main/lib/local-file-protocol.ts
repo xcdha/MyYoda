@@ -16,6 +16,8 @@ import { net } from 'electron'
 type RegisteredEntry = {
   root: string
   isDirectory: boolean
+  /** Optional least-privilege allowlist for relative paths under a directory root. */
+  allowedRelativePaths?: ReadonlySet<string>
   createdAt: number
 }
 
@@ -134,7 +136,20 @@ function createRangeResponse(target: string, rangeHeader: string, size: number):
   })
 }
 
-function registerEntry(path: string, isDirectory: boolean): string {
+function normalizeRelativePath(path: string): string | null {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(path).replaceAll('\\', '/')
+  } catch {
+    return null
+  }
+  if (!decoded || decoded.startsWith('/')) return null
+  const normalized = decoded.replace(/^\.\//, '')
+  if (!normalized || normalized === '.' || normalized === '..' || normalized.startsWith('../')) return null
+  return normalized
+}
+
+function registerEntry(path: string, isDirectory: boolean, allowedRelativePaths?: readonly string[]): string {
   pruneEntries()
   const root = realpathExisting(path)
   const st = statSync(root)
@@ -146,19 +161,26 @@ function registerEntry(path: string, isDirectory: boolean): string {
   }
 
   const token = randomUUID()
-  registeredEntries.set(token, { root, isDirectory, createdAt: Date.now() })
+  registeredEntries.set(token, {
+    root,
+    isDirectory,
+    allowedRelativePaths: allowedRelativePaths
+      ? new Set(allowedRelativePaths.map(normalizeRelativePath).filter((value): value is string => value !== null))
+      : undefined,
+    createdAt: Date.now(),
+  })
   return `myyoda-file://${token}`
 }
 
-export function registerPromaFilePath(path: string): string {
+export function registerMyYodaFilePath(path: string): string {
   return registerEntry(path, false)
 }
 
-export function registerPromaDirectoryPath(path: string): string {
-  return registerEntry(path, true)
+export function registerMyYodaDirectoryPath(path: string, allowedRelativePaths?: readonly string[]): string {
+  return registerEntry(path, true, allowedRelativePaths)
 }
 
-export function handlePromaFileRequest(request: Request): Promise<Response> | Response {
+export function handleMyYodaFileRequest(request: Request): Promise<Response> | Response {
   let url: URL
   try {
     url = new URL(request.url)
@@ -174,9 +196,14 @@ export function handlePromaFileRequest(request: Request): Promise<Response> | Re
 
   let target = entry.root
   if (entry.isDirectory) {
-    const relativePath = decodeURIComponent(url.pathname.replace(/^\/+/, ''))
+    const relativePath = url.pathname.replace(/^\/+/, '')
+    const normalizedRelativePath = normalizeRelativePath(relativePath)
+    if (!normalizedRelativePath) return new Response('Forbidden', { status: 403 })
+    if (entry.allowedRelativePaths && !entry.allowedRelativePaths.has(normalizedRelativePath)) {
+      return new Response('Forbidden', { status: 403 })
+    }
     try {
-      target = realpathSync(resolve(entry.root, relativePath))
+      target = realpathSync(resolve(entry.root, normalizedRelativePath))
     } catch {
       return new Response('Not Found', { status: 404 })
     }

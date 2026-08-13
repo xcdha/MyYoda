@@ -173,6 +173,7 @@ import { formatSidebarModuleCount } from './sidebar-module-model'
 
 import { CreateProjectDialog } from '@/components/work/CreateProjectDialog'
 import { AgentSessionItem, SessionItemActions } from './AgentSessionItem'
+import { deleteAgentSessionChildren, shouldDeleteAgentParent } from './agent-deletion-model'
 
 function getSidebarUpdateLabel(status: string, version?: string): string {
   const versionText = version ? ` v${version}` : ''
@@ -653,7 +654,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
   const [dragProjectId, setDragProjectId] = React.useState<string | null>(null)
   const [projectDropIndicator, setProjectDropIndicator] = React.useState<{ id: string; position: 'before' | 'after' } | null>(null)
   const [automationGroupOrder, setAutomationGroupOrder] = useAtom(automationGroupOrderAtom)
-  /** 新建工作区输入状态（设置页工作区管理；此处仅保留弹窗 busy 标志） */
+  /** 新建项目输入状态；此处仅保留弹窗 busy 标志 */
   const [creatingProject, setCreatingProject] = React.useState(false)
   const [relativeTimeNow, setRelativeTimeNow] = React.useState(() => Date.now())
   const [userProfile, setUserProfile] = useAtom(userProfileAtom)
@@ -728,6 +729,9 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
   const store = useStore()
   const sidebarRootRef = React.useRef<HTMLDivElement>(null)
   const quickSwitchTargetsRef = React.useRef<QuickSwitchTarget[]>([])
+  // 快捷切换只会标注前 9 行；保留它们避免滚动时全量清理/重写所有列表行。
+  const quickSwitchHintRowsRef = React.useRef<HTMLElement[]>([])
+  const quickSwitchRefreshFrameRef = React.useRef<number | null>(null)
   const quickSwitchHintTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const processedQuickSwitchEventsRef = React.useRef<WeakSet<KeyboardEvent>>(new WeakSet())
   const [quickSwitchHintsVisible, setQuickSwitchHintsVisible] = React.useState(false)
@@ -760,14 +764,15 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
     return () => window.clearInterval(id)
   }, [])
 
-  // 当 activeTabId 变化时，自动滚动侧边栏使选中项可见
+  // Chat 列表改由 virtualizer 按 index 定位；普通 Agent 项目列表当前仍是树状 DOM，
+  // 保留既有的原生定位行为，避免打开后台 Agent 会话后选中项不可见。
   React.useEffect(() => {
-    if (!activeTabId) return
+    if (!activeTabId || mode !== 'agent' || viewMode !== 'active') return
     requestAnimationFrame(() => {
-      const el = document.querySelector('.agent-session-item-active, .session-item-selected')
+      const el = document.querySelector('.agent-session-item-active')
       el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     })
-  }, [activeTabId])
+  }, [activeTabId, mode, viewMode])
 
   // per-conversation/session Map atoms（删除时清理）
   const setConvModels = useSetAtom(conversationModelsAtom)
@@ -886,7 +891,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
   /**
    * 当前工作区的 craft Project 列表。
    * ProjectsInitializer 按 slug 加载，这里再按 workspaceId 过滤，
-   * 避免空间切换瞬间 atom 尚未清空时把旧工作区渲到新空间组（闪一帧空子分组）。
+   * 避免工作区切换瞬间 atom 尚未清空时把旧项目渲到新工作区组（闪一帧空子分组）。
    */
   const currentWorkspaceProjects = React.useMemo(() => {
     if (!currentWorkspaceSlug) return EMPTY_PROJECTS
@@ -1201,36 +1206,69 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
   const handleConfirmDelete = async (cascade: boolean = false): Promise<void> => {
     if (!pendingDeleteId) return
 
-    // 关闭对应的标签页：setTabs 与 setActiveTabId 成组更新，便于阅读，
-    // 也避免将来在两者之间意外插入 await 导致跨渲染状态不一致。
-    // （React 18 在同一事件回调中会自动批处理多次 setState，所以单次渲染
-    // 的一致性由 React 保证，这里只是保持代码组织清晰。）
-    const wasActive = activeTabId === pendingDeleteId
-    const tabResult = closeTab(tabs, activeTabId, pendingDeleteId)
-    setTabs(tabResult.tabs)
-    setActiveTabId(tabResult.activeTabId)
-
-    // 若关闭的是当前活跃标签，同步新激活标签的副作用（appMode、
-    // currentXxxId、以及右侧文件面板等 per-tab 状态），保持与 TabBar
-    // 关闭逻辑一致，避免删除/归档当前会话后新标签状态缺失。
-    if (wasActive) {
-      const newActiveTab = tabResult.activeTabId
-        ? tabResult.tabs.find((t) => t.id === tabResult.activeTabId) ?? null
-        : null
-      syncActiveTabSideEffects(newActiveTab)
+    // Agent 会话的物理删除可能被 dirty Worktree 守卫拒绝；Agent 模式
+    // 延迟 UI 清理到 IPC 成功后，普通对话沿用原有立即关闭行为。
+    const applyAgentDeletionUi = (): void => {
+      const currentTabs = store.get(tabsAtom)
+      const currentActiveTabId = store.get(activeTabIdAtom)
+      const wasActive = currentActiveTabId === pendingDeleteId
+      const tabResult = closeTab(currentTabs, currentActiveTabId, pendingDeleteId)
+      setTabs(tabResult.tabs)
+      setActiveTabId(tabResult.activeTabId)
+      if (wasActive) {
+        const newActiveTab = tabResult.activeTabId
+          ? tabResult.tabs.find((t) => t.id === tabResult.activeTabId) ?? null
+          : null
+        syncActiveTabSideEffects(newActiveTab)
+      }
+      setDraftSessionIds((prev: Set<string>) => {
+        if (!prev.has(pendingDeleteId)) return prev
+        const next = new Set(prev)
+        next.delete(pendingDeleteId)
+        return next
+      })
+      cleanupMapAtoms(pendingDeleteId)
+      setExpandedDelegationParentIds((prev) => deleteSetEntry(prev, pendingDeleteId))
+      setAgentMessagesCache((prev) => {
+        if (!prev.has(pendingDeleteId)) return prev
+        const next = new Map(prev)
+        next.delete(pendingDeleteId)
+        return next
+      })
     }
 
-    // 清理 draft 标记（如有）
-    setDraftSessionIds((prev: Set<string>) => {
-      if (!prev.has(pendingDeleteId)) return prev
-      const next = new Set(prev)
-      next.delete(pendingDeleteId)
-      return next
-    })
+    if (mode !== 'agent') {
+      // 关闭对应的标签页：setTabs 与 setActiveTabId 成组更新，便于阅读，
+      // 也避免将来在两者之间意外插入 await 导致跨渲染状态不一致。
+      // （React 18 在同一事件回调中会自动批处理多次 setState，所以单次渲染
+      // 的一致性由 React 保证，这里只是保持代码组织清晰。）
+      const wasActive = activeTabId === pendingDeleteId
+      const tabResult = closeTab(tabs, activeTabId, pendingDeleteId)
+      setTabs(tabResult.tabs)
+      setActiveTabId(tabResult.activeTabId)
 
-    // 清理 per-conversation/session Map atoms 条目
-    cleanupMapAtoms(pendingDeleteId)
-    setExpandedDelegationParentIds((prev) => deleteSetEntry(prev, pendingDeleteId))
+      // 若关闭的是当前活跃标签，同步新激活标签的副作用（appMode、
+      // currentXxxId、以及右侧文件面板等 per-tab 状态），保持与 TabBar
+      // 关闭逻辑一致，避免删除/归档当前会话后新标签状态缺失。
+      if (wasActive) {
+        const newActiveTab = tabResult.activeTabId
+          ? tabResult.tabs.find((t) => t.id === tabResult.activeTabId) ?? null
+          : null
+        syncActiveTabSideEffects(newActiveTab)
+      }
+
+      // 清理 draft 标记（如有）
+      setDraftSessionIds((prev: Set<string>) => {
+        if (!prev.has(pendingDeleteId)) return prev
+        const next = new Set(prev)
+        next.delete(pendingDeleteId)
+        return next
+      })
+
+      // 清理 per-conversation/session Map atoms 条目
+      cleanupMapAtoms(pendingDeleteId)
+      setExpandedDelegationParentIds((prev) => deleteSetEntry(prev, pendingDeleteId))
+    }
 
     if (mode === 'agent') {
       // Agent 模式：删除 Agent 会话
@@ -1246,20 +1284,14 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
       try {
         // 先删子后删父：若子会话删除中途失败，父会话仍在，UI 一致性更好。
         if (childIds.length > 0) {
-          const failedChildIds: string[] = []
-          for (const childId of childIds) {
-            try {
-              await window.electronAPI.deleteAgentSession(childId)
-            } catch (error) {
-              console.error(`[侧边栏] 级联删除子会话失败 (${childId}):`, error)
-              failedChildIds.push(childId)
-            }
-          }
-          if (failedChildIds.length > 0) {
-            toast.error(`部分子会话删除失败（${failedChildIds.length} 个），请手动清理`)
-          }
-          closeArchivedAgentTabs(childIds)
-          for (const childId of childIds) {
+          const { deletedChildIds, failedChildIds } = await deleteAgentSessionChildren(
+            childIds,
+            (childId) => window.electronAPI.deleteAgentSession(childId),
+            (childId, error) => console.error(`[侧边栏] 级联删除子会话失败 (${childId}):`, error),
+          )
+          // 无论父会话是否继续删除，已经成功删除的子会话都必须先从 Renderer 收敛。
+          closeArchivedAgentTabs(deletedChildIds)
+          for (const childId of deletedChildIds) {
             setExpandedDelegationParentIds((prev) => deleteSetEntry(prev, childId))
             setAgentMessagesCache((prev) => {
               if (!prev.has(childId)) return prev
@@ -1268,23 +1300,38 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
               return next
             })
           }
+          if (childIds.length > 0 && !shouldDeleteAgentParent({ deletedChildIds, failedChildIds })) {
+            toast.error(`部分子会话删除失败（${failedChildIds.length} 个），父会话保留，请手动清理`)
+            try {
+              setAgentSessions(await window.electronAPI.listAgentSessions())
+            } catch (refreshError) {
+              console.error('[侧边栏] 子会话部分删除后的列表刷新失败:', refreshError)
+            }
+            // 不继续删除父会话；否则失败子会话会留下指向已删除父会话的孤儿关系。
+            return
+          }
         }
         await window.electronAPI.deleteAgentSession(pendingDeleteId)
-        // 全量刷新确保与后端同步
-        const sessions = await window.electronAPI.listAgentSessions()
-        setAgentSessions(sessions)
+        // IPC 成功即代表后端已删除父会话；先收敛 Tab/缓存，再刷新列表。
+        // 列表刷新失败不能把已经成功删除的会话继续留在 UI 中。
+        applyAgentDeletionUi()
+        try {
+          const sessions = await window.electronAPI.listAgentSessions()
+          setAgentSessions(sessions)
+        } catch (refreshError) {
+          console.error('[侧边栏] 删除成功后的会话列表刷新失败:', refreshError)
+        }
       } catch (error) {
         console.error('[侧边栏] 删除 Agent 会话失败:', error)
-        // 即使后端报错，也从本地列表移除（可能是会话已不存在）
-        setAgentSessions((prev) => prev.filter((s) => s.id !== pendingDeleteId))
+        // 后端可能因 dirty Worktree 等安全守卫拒绝删除；重新读取而不是
+        // 乐观移除，避免 Renderer 隐藏仍然存在的会话。
+        try {
+          const sessions = await window.electronAPI.listAgentSessions()
+          setAgentSessions(sessions)
+        } catch (refreshError) {
+          console.error('[侧边栏] 删除失败后的会话列表刷新失败:', refreshError)
+        }
       } finally {
-        // 清理该会话的消息缓存，避免已删除会话的消息数组滞留内存
-        setAgentMessagesCache((prev) => {
-          if (!prev.has(pendingDeleteId)) return prev
-          const next = new Map(prev)
-          next.delete(pendingDeleteId)
-          return next
-        })
         setPendingDeleteId(null)
       }
       return
@@ -1343,12 +1390,12 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
       const updated = await window.electronAPI.sendSessionCommand(sessionId, { kind: 'set_project_id', projectId })
       setAgentSessions((prev) => prev.map((s) => (s.id === updated.id ? updated : s)))
     } catch (error) {
-      console.error('[侧边栏] 移动到工作区失败:', error)
-      toast.error('移动到工作区失败')
+      console.error('[侧边栏] 移动到项目失败:', error)
+      toast.error('移动到项目失败')
     }
   }, [setAgentSessions])
 
-  /** 工作区模式下全局「+」新建工作区（KanbanProject，不是 Workspace） */
+  /** Project 分组模式下全局「+」新建项目（KanbanProject，不是 AgentWorkspace） */
   const handleCreateKanbanProject = React.useCallback(async (input: Parameters<typeof window.electronAPI.projects.create>[1]): Promise<void> => {
     if (!workspaceRoot) return
     setCreatingProject(true)
@@ -1356,13 +1403,13 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
       const project = await window.electronAPI.projects.create(workspaceRoot, input)
       setKanbanProjects((prev) => [project, ...prev.filter((existing) => existing.id !== project.id)])
       setCreateProjectOpen(false)
-      toast.success('工作区已创建')
+      toast.success('项目已创建')
       // 新建后进入唯一任务看板并按该 Project 筛选。
       setSelectedProjectId(project.id)
       setCodeMainView('tasks')
       setActiveView('conversations')
     } catch (cause) {
-      toast.error('创建工作区失败', { description: cause instanceof Error ? cause.message : String(cause) })
+      toast.error('创建项目失败', { description: cause instanceof Error ? cause.message : String(cause) })
     } finally {
       setCreatingProject(false)
     }
@@ -1503,7 +1550,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
     if (!workspaceId || !workspace) return
 
     if (!canDeleteWorkspace(workspace)) {
-      toast.error(workspace.slug === 'default' ? '默认空间不能删除' : '至少需要保留一个空间')
+      toast.error(workspace.slug === 'default' ? '默认工作区不能删除' : '至少需要保留一个工作区')
       setPendingDeleteWorkspaceId(null)
       return
     }
@@ -1555,13 +1602,23 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
       setActiveTabId(nextActiveTabId)
       syncActiveTabSideEffects(nextActiveTabId ? nextTabs.find((tab) => tab.id === nextActiveTabId) ?? null : null)
 
-      const [remainingWorkspaces, sessions] = await Promise.all([
-        window.electronAPI.listAgentWorkspaces(),
-        window.electronAPI.listAgentSessions(),
-      ])
-
+      // 后端删除成功后先按快照收敛本地列表；远端刷新失败不能把已删除工作区重新留在 UI。
+      let remainingWorkspaces = workspaces.filter((item) => item.id !== workspaceId)
+      let sessions = agentSessions.filter((session) => !deletedSessionIds.has(session.id))
       setWorkspaces(remainingWorkspaces)
       setAgentSessions(sessions)
+      try {
+        const [refreshedWorkspaces, refreshedSessions] = await Promise.all([
+          window.electronAPI.listAgentWorkspaces(),
+          window.electronAPI.listAgentSessions(),
+        ])
+        remainingWorkspaces = refreshedWorkspaces
+        sessions = refreshedSessions
+        setWorkspaces(remainingWorkspaces)
+        setAgentSessions(sessions)
+      } catch (refreshError) {
+        console.error('[侧边栏] 删除成功后的工作区/会话列表刷新失败:', refreshError)
+      }
 
       setExpandedExtraCounts((prev) => { const next = new Map(prev); next.delete(workspaceId); return next })
 
@@ -1583,12 +1640,12 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
         }
       }
 
-      toast.success('空间已删除', {
+      toast.success('工作区已删除', {
         description: `已删除「${workspace.name}」及其绑定资源`,
       })
     } catch (error) {
-      console.error('[侧边栏] 删除空间失败:', error)
-      const msg = error instanceof Error ? error.message : '删除空间失败'
+      console.error('[侧边栏] 删除工作区失败:', error)
+      const msg = error instanceof Error ? error.message : '删除工作区失败'
       toast.error(msg)
     } finally {
       setDeletingWorkspaceId(null)
@@ -1746,9 +1803,9 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
         .reorderAgentWorkspaces(newWorkspaceIds)
         .then(setWorkspaces)
         .catch((error) => {
-          console.error('[侧边栏] 空间排序失败:', error)
+          console.error('[侧边栏] 工作区排序失败:', error)
           setWorkspaces(workspaces)
-          toast.error('空间排序失败')
+          toast.error('工作区排序失败')
         })
     }
   }, [dragProjectId, projectDropIndicator, automationGroup, automationGroupOrder, setWorkspaces, workspaces])
@@ -1771,23 +1828,29 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
     })
   }, [openSession, setActiveView, setUnviewedCompleted])
 
-  const refreshQuickSwitchTargets = React.useCallback((): QuickSwitchTarget[] => {
-    const root = sidebarRootRef.current
-    if (!root) {
-      quickSwitchTargetsRef.current = []
-      return []
-    }
-
-    const rows = Array.from(root.querySelectorAll<HTMLElement>('.session-quick-switch-row'))
-    for (const row of rows) {
+  const clearQuickSwitchHints = React.useCallback((): void => {
+    for (const row of quickSwitchHintRowsRef.current) {
       delete row.dataset.quickSwitchLabel
       delete row.dataset.quickSwitchIndex
       row.querySelector<HTMLElement>('.session-quick-switch-modifier')?.replaceChildren()
       row.querySelector<HTMLElement>('.session-quick-switch-number')?.replaceChildren()
     }
+    quickSwitchHintRowsRef.current = []
+    quickSwitchTargetsRef.current = []
+  }, [])
 
+  const refreshQuickSwitchTargets = React.useCallback((): QuickSwitchTarget[] => {
+    const root = sidebarRootRef.current
+    if (!root) {
+      clearQuickSwitchHints()
+      return []
+    }
+
+    // 先完成所有布局读取，再只写入上次/本次涉及的最多 9 行，避免 write→read
+    // 交错造成的 forced reflow。
+    const rows = Array.from(root.querySelectorAll<HTMLElement>('.session-quick-switch-row'))
+    const selectedRows: HTMLElement[] = []
     const targets: QuickSwitchTarget[] = []
-    const modifierLabel = getPrimaryModifierLabel(isMac)
     for (const row of rows) {
       if (targets.length >= SESSION_QUICK_SWITCH_LIMIT) break
       if (!isQuickSwitchRowVisible(row, root)) continue
@@ -1797,56 +1860,71 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
         !sessionSwitchId
         || !sessionSwitchTitle
         || (sessionSwitchType !== 'chat' && sessionSwitchType !== 'agent')
-      ) {
-        continue
-      }
+      ) continue
 
-      const index = targets.length + 1
-      row.dataset.quickSwitchIndex = String(index)
-      row.dataset.quickSwitchLabel = `${modifierLabel}${index}`
+      selectedRows.push(row)
+      targets.push({ id: sessionSwitchId, title: sessionSwitchTitle, type: sessionSwitchType })
+    }
+
+    const modifierLabel = getPrimaryModifierLabel(isMac)
+    const nextRows = new Set(selectedRows)
+    for (const row of quickSwitchHintRowsRef.current) {
+      if (nextRows.has(row)) continue
+      delete row.dataset.quickSwitchLabel
+      delete row.dataset.quickSwitchIndex
+      row.querySelector<HTMLElement>('.session-quick-switch-modifier')?.replaceChildren()
+      row.querySelector<HTMLElement>('.session-quick-switch-number')?.replaceChildren()
+    }
+    selectedRows.forEach((row, index) => {
+      const position = String(index + 1)
+      if (row.dataset.quickSwitchIndex === position) return
+      row.dataset.quickSwitchIndex = position
+      row.dataset.quickSwitchLabel = `${modifierLabel}${position}`
       const modifier = row.querySelector<HTMLElement>('.session-quick-switch-modifier')
       const number = row.querySelector<HTMLElement>('.session-quick-switch-number')
       if (modifier) modifier.textContent = modifierLabel
-      if (number) number.textContent = String(index)
-      targets.push({
-        id: sessionSwitchId,
-        title: sessionSwitchTitle,
-        type: sessionSwitchType,
-      })
-    }
+      if (number) number.textContent = position
+    })
 
+    quickSwitchHintRowsRef.current = selectedRows
     quickSwitchTargetsRef.current = targets
     return targets
-  }, [isMac])
+  }, [clearQuickSwitchHints, isMac])
 
   React.useEffect(() => {
     const root = sidebarRootRef.current
     if (!root) return
 
     if (!quickSwitchHintsVisible) {
-      const rows = Array.from(root.querySelectorAll<HTMLElement>('.session-quick-switch-row'))
-      for (const row of rows) {
-        delete row.dataset.quickSwitchLabel
-        delete row.dataset.quickSwitchIndex
-        row.querySelector<HTMLElement>('.session-quick-switch-modifier')?.replaceChildren()
-        row.querySelector<HTMLElement>('.session-quick-switch-number')?.replaceChildren()
+      if (quickSwitchRefreshFrameRef.current !== null) {
+        cancelAnimationFrame(quickSwitchRefreshFrameRef.current)
+        quickSwitchRefreshFrameRef.current = null
       }
-      quickSwitchTargetsRef.current = []
+      clearQuickSwitchHints()
       return
     }
 
     const refresh = (): void => {
-      refreshQuickSwitchTargets()
+      if (quickSwitchRefreshFrameRef.current !== null) return
+      quickSwitchRefreshFrameRef.current = requestAnimationFrame(() => {
+        quickSwitchRefreshFrameRef.current = null
+        refreshQuickSwitchTargets()
+      })
     }
     refresh()
     root.addEventListener('scroll', refresh, true)
     window.addEventListener('resize', refresh)
     return () => {
+      if (quickSwitchRefreshFrameRef.current !== null) {
+        cancelAnimationFrame(quickSwitchRefreshFrameRef.current)
+        quickSwitchRefreshFrameRef.current = null
+      }
       root.removeEventListener('scroll', refresh, true)
       window.removeEventListener('resize', refresh)
     }
   }, [
     quickSwitchHintsVisible,
+    clearQuickSwitchHints,
     refreshQuickSwitchTargets,
     sidebarCollapsed,
     mode,
@@ -1975,7 +2053,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
       const updated = await window.electronAPI.updateAgentWorkspace(workspaceId, { name: newName })
       setWorkspaces((prev) => prev.map((w) => (w.id === updated.id ? updated : w)))
     } catch (error) {
-      console.error('[侧边栏] 重命名空间失败:', error)
+      console.error('[侧边栏] 重命名工作区失败:', error)
       const msg = error instanceof Error ? error.message : '重命名失败'
       toast.error(msg)
     }
@@ -2544,7 +2622,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
     </AlertDialog>
   )
 
-  // 空间删除确认弹窗（会同时删除其下的会话与绑定资源）
+  // 工作区删除确认弹窗（会同时删除其下的会话与绑定资源）
   const projectDeleteDialog = (
     <AlertDialog
       open={pendingDeleteWorkspaceId !== null}
@@ -2562,9 +2640,9 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
         }}
       >
         <AlertDialogHeader>
-          <AlertDialogTitle>确认删除空间</AlertDialogTitle>
+          <AlertDialogTitle>确认删除工作区</AlertDialogTitle>
           <AlertDialogDescription>
-            将删除「{pendingDeleteWorkspace?.name ?? '该空间'}」及其绑定的所有会话、自动任务、MCP、Skills、工作区文件和本地工作区目录。附加目录和附加文件只会移除引用，不会删除原始文件。删除后无法恢复。
+            将删除「{pendingDeleteWorkspace?.name ?? '该工作区'}」及其绑定的所有会话、自动任务、MCP、Skills、工作区文件和 MyYoda 托管目录。附加目录、附加文件和项目绑定的外部工作目录只会移除引用，不会删除原始文件。Todo 与日程记录不会被删除，但之后可能需要重新归类。删除后无法恢复。
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -2574,7 +2652,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
             onClick={handleConfirmDeleteWorkspace}
             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
           >
-            {deletingWorkspaceId ? '删除中...' : '删除空间'}
+            {deletingWorkspaceId ? '删除中...' : '删除工作区'}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -2644,7 +2722,7 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
           <CollapsedWorkspacePopover>
             <button
               type="button"
-              aria-label="切换到 Project 模式（悬停查看空间）"
+              aria-label="切换到 Project 模式（悬停查看工作区）"
               onClick={() => handleRailModeSwitch('agent')}
               className={cn(
                 'relative size-10 flex items-center justify-center rounded-[12px] transition-colors titlebar-no-drag',
@@ -3492,11 +3570,11 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
 
       {/* 会话列表筛选行：对标 Claude 的分组标题行（如「Today」右侧筛选图标），
           不再是孤立的图标，而是左边带标签、右边带筛选的全宽标题行；
-          工作区模式下额外包含「新建工作区 +」按钮 */}
+          项目分组模式下额外包含「新建项目 +」按钮 */}
       {mode === 'agent' && (
         <div className="flex items-center justify-between px-3 pt-1 pb-1 border-b border-border/50">
           <span className="px-1.5 text-[11px] font-medium text-foreground/35 select-none">
-            {agentGroupBy === 'project' ? '工作区' : '会话'}
+            {agentGroupBy === 'project' ? '项目' : '会话'}
           </span>
           <span className="flex items-center gap-0.5">
             {agentGroupBy === 'project' && (
@@ -3504,14 +3582,14 @@ export function LeftSidebar({ width, noTransition }: LeftSidebarProps): React.Re
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    aria-label="新建工作区"
+                    aria-label="新建项目"
                     onClick={() => setCreateProjectOpen(true)}
                     className="grid size-6 place-items-center rounded-md text-foreground/50 transition-colors hover:bg-foreground/[0.06] hover:text-foreground/80"
                   >
                     <Plus size={14} />
                   </button>
                 </TooltipTrigger>
-                <TooltipContent side="bottom">新建工作区</TooltipContent>
+                <TooltipContent side="bottom">新建项目</TooltipContent>
               </Tooltip>
             )}
             <SessionListFilterMenu />
@@ -3998,7 +4076,7 @@ interface ChildSessionItemProps {
   agentIndicatorMap: Map<string, SessionIndicatorStatus>
   relativeTimeNow: number
   workspaceName?: string
-  /** 当前工作区列表 + 移动回调；透传给会话行的「移动到工作区」子菜单 */
+  /** 当前项目列表 + 移动回调；透传给会话行的「移动到项目」子菜单 */
   projects?: KanbanProject[]
   onMoveToProject?: (sessionId: string, projectId?: string) => void | Promise<void>
   /** 当前工作区自定义分组 + 移动/新建回调；透传给会话行的「移动到分组」子菜单 */
@@ -4441,7 +4519,7 @@ const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
               onSelect={() => onRequestDeleteWorkspace(group.workspace.id)}
             >
               <Trash2 size={14} />
-              删除空间
+              删除工作区
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

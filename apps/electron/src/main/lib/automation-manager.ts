@@ -27,7 +27,7 @@ interface AutomationsIndex {
   automations: Automation[]
 }
 
-const INDEX_VERSION = 2
+const INDEX_VERSION = 4
 
 /**
  * 兼容历史字段：
@@ -48,6 +48,18 @@ function migrateLegacyFields(data: AutomationsIndex): boolean {
     const permissionMode = a.permissionMode as string | undefined
     if (permissionMode && permissionMode !== AUTOMATION_DEFAULT_PERMISSION_MODE) {
       a.permissionMode = AUTOMATION_DEFAULT_PERMISSION_MODE
+      changed = true
+    }
+    // 移除已退役 runtime 字段。此前的 Claude/缺失 runtime 不可复用其会话，
+    // 因此清空 lastSessionId，下一次运行必定创建新的 Pi 会话。
+    const raw = a as Automation & { agentRuntime?: unknown }
+    const wasLegacyRuntime = raw.agentRuntime !== 'pi'
+    if ('agentRuntime' in raw) {
+      delete raw.agentRuntime
+      changed = true
+    }
+    if (wasLegacyRuntime && a.lastSessionId) {
+      a.lastSessionId = undefined
       changed = true
     }
   }
@@ -123,12 +135,13 @@ function writeIndex(index: AutomationsIndex): void {
  * - daily：今天/明天的 timeOfDay
  * - weekly：本周/下周 dayOfWeek 的 timeOfDay
  * - once：直接返回固定的 scheduledAt（不做任何前进推算），跑完后由 appendRun 自动停用
+ * - interval 叠加 activeWindowStart/activeWindowEnd 时，仅在每日窗口内运行；窗口外自动跳至下一天窗口开始
  *
  * 返回值保证为有限正整数。输入非法时回退到 from + 10min 并打印警告。
  */
 export function computeNextRunAt(
   a: { scheduleType: Automation['scheduleType'] } & Partial<
-    Pick<Automation, 'intervalMinutes' | 'timeOfDay' | 'dayOfWeek' | 'dayOfMonth' | 'scheduledAt'>
+    Pick<Automation, 'intervalMinutes' | 'activeWindowStart' | 'activeWindowEnd' | 'activeWeekdays' | 'timeOfDay' | 'dayOfWeek' | 'dayOfMonth' | 'scheduledAt'>
   >,
   from: number = Date.now(),
 ): number {
@@ -152,7 +165,69 @@ export function computeNextRunAt(
       console.warn(`[定时任务] computeNextRunAt: intervalMinutes 非法 (${a.intervalMinutes})，回退到 10 分钟`)
       result = from + FALLBACK_INTERVAL_MS
     } else {
-      result = from + Math.max(1, minutes) * 60_000
+      const step = Math.max(1, minutes) * 60_000
+      const parseWindowTime = (value: string | undefined): [number, number] | undefined => {
+        if (!value || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) return undefined
+        const [hours, minutes] = value.split(':').map(Number)
+        return [hours!, minutes!]
+      }
+      const start = parseWindowTime(a.activeWindowStart)
+      const end = parseWindowTime(a.activeWindowEnd)
+      const hasWindow = !!start && !!end && start[0] * 60 + start[1] < end[0] * 60 + end[1]
+      const weekdays = [...new Set((a.activeWeekdays ?? []).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))]
+      const isAllowedDay = (date: Date): boolean => weekdays.length === 0 || weekdays.includes(date.getDay())
+      const nextAllowedDay = (date: Date): Date => {
+        const next = new Date(date)
+        for (let i = 0; i < 7; i++) {
+          if (i > 0) next.setDate(next.getDate() + 1)
+          if (isAllowedDay(next)) return next
+        }
+        return next
+      }
+
+      if (hasWindow) {
+        const windowStart = new Date(from)
+        windowStart.setHours(start![0], start![1], 0, 0)
+        const windowEnd = new Date(from)
+        windowEnd.setHours(end![0], end![1], 0, 0)
+        if (!isAllowedDay(windowStart) || from >= windowEnd.getTime()) {
+          windowStart.setDate(windowStart.getDate() + (from >= windowEnd.getTime() ? 1 : 0))
+          const next = nextAllowedDay(windowStart)
+          next.setHours(start![0], start![1], 0, 0)
+          result = next.getTime()
+        } else if (from < windowStart.getTime()) {
+          result = windowStart.getTime()
+        } else {
+          // 窗口起点是 interval 锚点，避免执行耗时造成 10:00、10:20… 的漂移。
+          const elapsed = from - windowStart.getTime()
+          const candidate = windowStart.getTime() + (Math.floor(elapsed / step) + 1) * step
+          if (candidate < windowEnd.getTime()) {
+            result = candidate
+          } else {
+            const next = new Date(windowStart)
+            next.setDate(next.getDate() + 1)
+            const allowed = nextAllowedDay(next)
+            allowed.setHours(start![0], start![1], 0, 0)
+            result = allowed.getTime()
+          }
+        }
+      } else {
+        const current = new Date(from)
+        if (isAllowedDay(current)) {
+          const candidate = from + step
+          if (isAllowedDay(new Date(candidate))) {
+            result = candidate
+          } else {
+            const next = nextAllowedDay(new Date(candidate))
+            next.setHours(current.getHours(), current.getMinutes(), current.getSeconds(), current.getMilliseconds())
+            result = next.getTime()
+          }
+        } else {
+          const next = nextAllowedDay(current)
+          next.setHours(current.getHours(), current.getMinutes(), current.getSeconds(), current.getMilliseconds())
+          result = next.getTime()
+        }
+      }
     }
   } else {
     const timeOfDay = a.timeOfDay ?? '09:00'
@@ -272,13 +347,14 @@ export function createAutomation(input: CreateAutomationInput): Automation {
     active,
     scheduleType: input.scheduleType,
     intervalMinutes: input.intervalMinutes,
+    activeWindowStart: input.activeWindowStart,
+    activeWindowEnd: input.activeWindowEnd,
+    activeWeekdays: input.activeWeekdays,
     timeOfDay: input.timeOfDay,
     dayOfWeek: input.dayOfWeek,
     dayOfMonth: input.dayOfMonth,
     scheduledAt: input.scheduledAt,
     maxRuns: normalizeMaxRuns(input.maxRuns),
-    // 新建任务未指定 runtime 时默认 Pi；已有历史任务的缺省值由读取/调度路径继续按 Claude 处理。
-    agentRuntime: input.agentRuntime ?? 'pi',
     channelId: input.channelId,
     modelId: input.modelId,
     workspaceId: input.workspaceId,
@@ -311,7 +387,6 @@ export function updateAutomation(input: UpdateAutomationInput): Automation | und
   const now = Date.now()
   if (input.name !== undefined) target.name = input.name
   if (input.prompt !== undefined) target.prompt = input.prompt
-  if (input.agentRuntime !== undefined) target.agentRuntime = input.agentRuntime
   if (input.channelId !== undefined) target.channelId = input.channelId
   if (input.modelId !== undefined) target.modelId = input.modelId
   // workspaceId 允许设为空字符串表示「无工作区」；用 undefined 区分「不修改」
@@ -339,12 +414,18 @@ export function updateAutomation(input: UpdateAutomationInput): Automation | und
   const scheduleChanged =
     (input.scheduleType !== undefined && input.scheduleType !== target.scheduleType) ||
     (input.intervalMinutes !== undefined && input.intervalMinutes !== target.intervalMinutes) ||
+    (input.activeWindowStart !== undefined && input.activeWindowStart !== target.activeWindowStart) ||
+    (input.activeWindowEnd !== undefined && input.activeWindowEnd !== target.activeWindowEnd) ||
+    (input.activeWeekdays !== undefined && JSON.stringify(input.activeWeekdays ?? []) !== JSON.stringify(target.activeWeekdays ?? [])) ||
     (input.timeOfDay !== undefined && input.timeOfDay !== target.timeOfDay) ||
     (input.dayOfWeek !== undefined && input.dayOfWeek !== target.dayOfWeek) ||
     (input.dayOfMonth !== undefined && input.dayOfMonth !== target.dayOfMonth) ||
     (input.scheduledAt !== undefined && input.scheduledAt !== target.scheduledAt)
   if (input.scheduleType !== undefined) target.scheduleType = input.scheduleType
   if (input.intervalMinutes !== undefined) target.intervalMinutes = input.intervalMinutes
+  if (input.activeWindowStart !== undefined) target.activeWindowStart = input.activeWindowStart ?? undefined
+  if (input.activeWindowEnd !== undefined) target.activeWindowEnd = input.activeWindowEnd ?? undefined
+  if (input.activeWeekdays !== undefined) target.activeWeekdays = input.activeWeekdays ?? undefined
   if (input.timeOfDay !== undefined) target.timeOfDay = input.timeOfDay
   if (input.dayOfWeek !== undefined) target.dayOfWeek = input.dayOfWeek
   if (input.dayOfMonth !== undefined) target.dayOfMonth = input.dayOfMonth
@@ -357,7 +438,7 @@ export function updateAutomation(input: UpdateAutomationInput): Automation | und
   if (input.active !== undefined && input.active !== target.active) {
     // 启用要求 channelId + workspaceId 齐全，否则拒绝（兜底前端校验，避免空配置任务进入调度）
     if (input.active && !isAutomationRunnable(target)) {
-      throw new Error('启用定时任务前必须配置模型与空间')
+      throw new Error('启用定时任务前必须配置模型与工作区')
     }
     target.active = input.active
     if (input.active) {

@@ -1,7 +1,8 @@
 /**
  * 存储管理服务
  *
- * 提供磁盘用量统计、孤儿数据检测和清理功能。
+ * 提供磁盘用量统计和临时文件清理功能。
+ * 孤儿数据清理因可能误伤用户工作资料而默认关闭。
  * 由设置面板"磁盘管理"Tab 和启动时自动清理逻辑调用。
  */
 
@@ -14,14 +15,17 @@ import { app } from 'electron'
 import {
   getConfigDir,
   getAgentSessionsDir,
+  getAgentSessionsIndexPath,
   getSdkConfigDir,
   getAgentWorkspacesDir,
+  getAgentWorkspacesIndexPath,
   getAttachmentsDir,
   getConversationsDir,
 } from './config-paths'
 import { listAgentSessions } from './agent-session-manager'
 import { listAgentWorkspaces } from './agent-workspace-manager'
 import { isWorkspaceMetadataDir } from './storage-boundaries'
+import { assessOrphanCleanupIndex } from './storage-cleanup-policy'
 
 // ─── 类型定义 ───
 
@@ -82,6 +86,9 @@ const SKIP_DIRS = new Set([
 // 单次扫描最大文件数上限，防止超大工作区导致无限递归
 const MAX_FILE_SCAN = 100_000
 const MAX_ORPHAN_ITEM_PREVIEW = 80
+
+// 孤儿目录无法可靠区分用户仍需保留的会话工作资料，默认不展示也不允许删除。
+const ORPHAN_DATA_CLEANUP_ENABLED = false
 
 const PRESERVED_ORPHAN_SESSION_DIRS = new Set([
   '.context',
@@ -229,7 +236,7 @@ async function calcAgentSessionsCategory(): Promise<StorageCategory> {
           const id = basename(file, '.jsonl')
           bytes += stat.size
           count++
-          if (!activeIds.has(id)) {
+          if (ORPHAN_DATA_CLEANUP_ENABLED && !activeIds.has(id)) {
             orphanBytes += stat.size
             orphanCount++
             orphanItemsTruncated = addOrphanItem(orphanItems, {
@@ -391,7 +398,7 @@ async function calcWorkspacesCategory(): Promise<StorageCategory> {
               bytes += sub.bytes
               count += sub.count
               // session 目录的 ID 不在活跃列表中 → 孤儿
-              if (!activeIds.has(entry) && !activeSlugs.has(entry)) {
+              if (ORPHAN_DATA_CLEANUP_ENABLED && !activeIds.has(entry) && !activeSlugs.has(entry)) {
                 const cleanable = await getDirSize(entryPath, { skipTopLevelDirs: PRESERVED_ORPHAN_SESSION_DIRS })
                 if (cleanable.count > 0) {
                   orphanBytes += cleanable.bytes
@@ -521,10 +528,16 @@ export async function cleanupTempFiles(): Promise<CleanupResult> {
 
 async function cleanupOrphanAgentSessions(): Promise<CleanupResult> {
   const dir = getAgentSessionsDir()
-  const activeIds = getActiveSessionIds()
   let freedBytes = 0, deletedCount = 0
   const errors: string[] = []
 
+  const assessment = assessOrphanCleanupIndex(getAgentSessionsIndexPath(), dir, 'sessions')
+  if (!assessment.safe) {
+    errors.push(`已跳过孤儿会话清理：会话索引${assessment.reason === 'index_missing' ? '缺失' : assessment.reason === 'index_invalid' ? '结构非法' : '不可恢复'}`)
+    return { freedBytes, deletedCount, errors }
+  }
+
+  const activeIds = getActiveSessionIds()
   if (!existsSync(dir)) return { freedBytes, deletedCount, errors }
 
   try {
@@ -600,11 +613,17 @@ async function cleanupOrphanSdkConfig(): Promise<CleanupResult> {
 
 async function cleanupOrphanWorkspaces(): Promise<CleanupResult> {
   const wsDir = getAgentWorkspacesDir()
-  const activeIds = getActiveSessionIds()
-  const activeSlugs = getActiveWorkspaceSlugs()
   let freedBytes = 0, deletedCount = 0
   const errors: string[] = []
 
+  const assessment = assessOrphanCleanupIndex(getAgentWorkspacesIndexPath(), wsDir, 'workspaces')
+  if (!assessment.safe) {
+    errors.push(`已跳过孤儿工作区清理：工作区索引${assessment.reason === 'index_missing' ? '缺失' : assessment.reason === 'index_invalid' ? '结构非法' : '不可恢复'}`)
+    return { freedBytes, deletedCount, errors }
+  }
+
+  const activeIds = getActiveSessionIds()
+  const activeSlugs = getActiveWorkspaceSlugs()
   if (!existsSync(wsDir)) return { freedBytes, deletedCount, errors }
 
   try {
@@ -669,6 +688,14 @@ function cleanupArchivedSessions(beforeDays: number): CleanupResult {
 }
 
 export async function cleanupStorage(options: CleanupOptions): Promise<CleanupResult> {
+  if (options.orphansOnly && !ORPHAN_DATA_CLEANUP_ENABLED) {
+    return {
+      freedBytes: 0,
+      deletedCount: 0,
+      errors: ['孤儿数据清理功能已默认关闭，未删除任何数据'],
+    }
+  }
+
   let totalFreed = 0, totalDeleted = 0
   const allErrors: string[] = []
 
@@ -687,7 +714,8 @@ export async function cleanupStorage(options: CleanupOptions): Promise<CleanupRe
     if (options.orphansOnly) {
       switch (cat) {
         case 'agent-sessions': merge(await cleanupOrphanAgentSessions()); break
-        case 'sdk-config': merge(await cleanupOrphanSdkConfig()); break
+        // Pi-only runtime 不再拥有可安全推导 active ownership 的 SDK orphan 索引；沿用 MyYoda，保留这些历史文件。
+        case 'sdk-config': break
         case 'workspaces': merge(await cleanupOrphanWorkspaces()); break
       }
     } else if (options.archivedBeforeDays > 0) {

@@ -10,8 +10,9 @@
  * 所有业务逻辑已委托给 AgentOrchestrator。
  */
 
-import { join, dirname } from 'node:path'
+import { dirname, relative } from 'node:path'
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { resolveSafeChildPath } from './agent-file-path-policy'
 import { BrowserWindow } from 'electron'
 import type { WebContents } from 'electron'
 import { AGENT_IPC_CHANNELS, MAX_ATTACHMENT_SIZE } from '@myyoda/shared'
@@ -28,23 +29,20 @@ import type {
   AgentExternalRunSource,
   AgentMessage,
 } from '@myyoda/shared'
-import { ClaudeAgentAdapter, scanAndKillOrphanedClaudeSubprocesses } from './adapters/claude-agent-adapter'
 import { PiAgentAdapter, cleanupPiRuntimeResources } from './adapters/pi-agent-adapter'
-import { RuntimeRoutingAgentAdapter } from './adapters/runtime-routing-agent-adapter'
 import { AgentEventBus } from './agent-event-bus'
 import { AgentOrchestrator } from './agent-orchestrator'
 import { getAgentSessionWorkspacePath, getWorkspaceFilesDir } from './config-paths'
-import { getAgentSessionMeta, updateAgentSessionMeta } from './agent-session-manager'
+import { getAgentSessionMeta, listAgentSessions, updateAgentSessionMeta } from './agent-session-manager'
 import { setAgentStopper, setHeadlessAgentRunner } from './agent-headless-runner-registry'
 import { getHeadlessAgentRunTarget } from './agent-headless-run-target'
+import { assertRegisteredSessionUpload, resolveRegisteredUploadWorkspace } from './agent-upload-boundary-policy'
+import { listAgentWorkspaces } from './agent-workspace-manager'
 
 // ===== 实例创建 =====
 
 const eventBus = new AgentEventBus()
-const adapter = new RuntimeRoutingAgentAdapter({
-  claude: new ClaudeAgentAdapter(),
-  pi: new PiAgentAdapter(),
-})
+const adapter = new PiAgentAdapter()
 const orchestrator = new AgentOrchestrator(adapter, eventBus)
 
 function getCompletionSessionOrigin(sessionId: string): { sourceDelegationId?: string; taskNodeId?: string } {
@@ -182,6 +180,7 @@ eventBus.use((sessionId, payload, next) => {
 export async function runAgent(
   input: AgentSendInput,
   webContents: WebContents,
+  extensions?: { piCustomTools?: import('@earendil-works/pi-coding-agent').ToolDefinition[] },
 ): Promise<void> {
   // 更新 webContents 映射（允许覆盖 — 由 orchestrator.activeSessions 处理真正的并发保护）
   registerWebContents(input.sessionId, webContents)
@@ -250,7 +249,7 @@ export async function runAgent(
           event: { type: 'run_started', startedAt },
         })
       },
-    })
+    }, extensions)
   } catch (err) {
     console.error('[Agent 服务] runAgent 未处理异常:', err)
     const errorMessage = err instanceof Error ? err.message : '未知错误'
@@ -299,6 +298,7 @@ export async function runAgentHeadless(
     source?: AgentExternalRunSource
     originSessionId?: string
   },
+  extensions?: { piCustomTools?: import('@earendil-works/pi-coding-agent').ToolDefinition[] },
 ): Promise<void> {
   // 委派子会话优先回到父会话所在 renderer，外部无界面运行才回退任意主窗口。
   const wc = getHeadlessAgentRunTarget(
@@ -435,13 +435,12 @@ export function stopAllAgents(): void {
 }
 
 /**
- * 退出前最后兜底：扫描并强杀所有孤儿 claude-agent-sdk 子进程
+ * 退出前清理 Pi runtime 资源。
  *
- * 必须在 stopAllAgents() 之后调用。针对 pidMap 未覆盖、dispose 漏杀等极端场景。
- * 同步执行，不 await，确保 before-quit 能在 Electron 超时前完成。
+ * 必须在 stopAllAgents() 之后调用。同步执行，确保 before-quit 能在 Electron 超时前完成。
  */
 export function killOrphanedClaudeSubprocesses(): void {
-  scanAndKillOrphanedClaudeSubprocesses()
+  // Claude runtime 已于 2026-08 退役，此函数仅保留兼容 app lifecycle 调用。
   cleanupPiRuntimeResources()
 }
 
@@ -488,12 +487,18 @@ export async function queueAgentMessage(
  * 将 base64 编码的文件写入 session 的 cwd，供 Agent 通过 Read 工具读取。
  */
 export function saveFilesToAgentSession(input: AgentSaveFilesInput): AgentSavedFile[] {
-  const sessionDir = getAgentSessionWorkspacePath(input.workspaceSlug, input.sessionId)
+  const { workspace, session } = assertRegisteredSessionUpload(
+    input.workspaceSlug,
+    input.sessionId,
+    listAgentWorkspaces().map(({ id, slug }) => ({ id, slug })),
+    listAgentSessions().map(({ id, workspaceId }) => ({ id, workspaceId })),
+  )
+  const sessionDir = getAgentSessionWorkspacePath(workspace.slug, session.id)
   const results: AgentSavedFile[] = []
   const usedPaths = new Set<string>()
 
   for (const file of input.files) {
-    let targetPath = join(sessionDir, file.filename)
+    let targetPath = resolveSafeChildPath(sessionDir, file.filename)
 
     // 防止同名文件覆盖
     if (usedPaths.has(targetPath) || existsSync(targetPath)) {
@@ -501,10 +506,10 @@ export function saveFilesToAgentSession(input: AgentSaveFilesInput): AgentSavedF
       const baseName = dotIdx > 0 ? file.filename.slice(0, dotIdx) : file.filename
       const ext = dotIdx > 0 ? file.filename.slice(dotIdx) : ''
       let counter = 1
-      let candidate = join(sessionDir, `${baseName}-${counter}${ext}`)
+      let candidate = resolveSafeChildPath(sessionDir, `${baseName}-${counter}${ext}`)
       while (usedPaths.has(candidate) || existsSync(candidate)) {
         counter++
-        candidate = join(sessionDir, `${baseName}-${counter}${ext}`)
+        candidate = resolveSafeChildPath(sessionDir, `${baseName}-${counter}${ext}`)
       }
       targetPath = candidate
     }
@@ -512,17 +517,10 @@ export function saveFilesToAgentSession(input: AgentSaveFilesInput): AgentSavedF
 
     mkdirSync(dirname(targetPath), { recursive: true })
 
-    // 防御性检查：base64 字符串长度估算是否超 100MB 限制
-    // base64 编码膨胀率约 4/3，data.length * 0.75 ≈ 原始字节数
-    if (file.data.length * 0.75 > MAX_ATTACHMENT_SIZE) {
-      console.warn(`[Agent 服务] 文件超过 100MB 限制，跳过: ${file.filename} (预估 ${(file.data.length * 0.75 / 1024 / 1024).toFixed(1)}MB)`)
-      continue
-    }
-
     const buffer = Buffer.from(file.data, 'base64')
     writeFileSync(targetPath, buffer)
 
-    const actualFilename = targetPath.slice(sessionDir.length + 1)
+    const actualFilename = relative(sessionDir, targetPath)
     results.push({ filename: actualFilename, targetPath })
     console.log(`[Agent 服务] 文件已保存: ${targetPath} (${buffer.length} bytes)`)
   }
@@ -536,12 +534,17 @@ export function saveFilesToAgentSession(input: AgentSaveFilesInput): AgentSavedF
  * 将 base64 编码的文件写入工作区 workspace-files/ 目录，所有会话均可访问。
  */
 export function saveFilesToWorkspaceFiles(input: AgentSaveWorkspaceFilesInput): AgentSavedFile[] {
-  const wsFilesDir = getWorkspaceFilesDir(input.workspaceSlug)
+  const workspace = resolveRegisteredUploadWorkspace(
+    input.workspaceSlug,
+    listAgentWorkspaces().map(({ id, slug }) => ({ id, slug })),
+  )
+  if (!workspace) throw new Error('Workspace slug 未注册')
+  const wsFilesDir = getWorkspaceFilesDir(workspace.slug)
   const results: AgentSavedFile[] = []
   const usedPaths = new Set<string>()
 
   for (const file of input.files) {
-    let targetPath = join(wsFilesDir, file.filename)
+    let targetPath = resolveSafeChildPath(wsFilesDir, file.filename)
 
     // 防止同名文件覆盖
     if (usedPaths.has(targetPath) || existsSync(targetPath)) {
@@ -549,10 +552,10 @@ export function saveFilesToWorkspaceFiles(input: AgentSaveWorkspaceFilesInput): 
       const baseName = dotIdx > 0 ? file.filename.slice(0, dotIdx) : file.filename
       const ext = dotIdx > 0 ? file.filename.slice(dotIdx) : ''
       let counter = 1
-      let candidate = join(wsFilesDir, `${baseName}-${counter}${ext}`)
+      let candidate = resolveSafeChildPath(wsFilesDir, `${baseName}-${counter}${ext}`)
       while (usedPaths.has(candidate) || existsSync(candidate)) {
         counter++
-        candidate = join(wsFilesDir, `${baseName}-${counter}${ext}`)
+        candidate = resolveSafeChildPath(wsFilesDir, `${baseName}-${counter}${ext}`)
       }
       targetPath = candidate
     }
@@ -568,7 +571,7 @@ export function saveFilesToWorkspaceFiles(input: AgentSaveWorkspaceFilesInput): 
     const buffer = Buffer.from(file.data, 'base64')
     writeFileSync(targetPath, buffer)
 
-    const actualFilename = targetPath.slice(wsFilesDir.length + 1)
+    const actualFilename = relative(wsFilesDir, targetPath)
     results.push({ filename: actualFilename, targetPath })
     console.log(`[Agent 服务] 工作区文件已保存: ${targetPath} (${buffer.length} bytes)`)
   }

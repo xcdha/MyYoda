@@ -92,6 +92,9 @@ import {
 } from './feishu/prompt-builder'
 
 import { redactSensitiveLogText, redactSensitiveLogValue } from './bridge-log-redaction'
+import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
+import { Type } from 'typebox'
+import type { AgentToolResult } from '@earendil-works/pi-agent-core'
 
 // ===== 类型定义 =====
 
@@ -1083,7 +1086,7 @@ class FeishuBridge {
     }
 
     if (!workspaceId) {
-      await this.sendMessage(chatId, '请先在 MyYoda 设置中创建空间。')
+      await this.sendMessage(chatId, '请先在 MyYoda 设置中创建工作区。')
       return
     }
 
@@ -1100,7 +1103,6 @@ class FeishuBridge {
       channelId,
       workspaceId,
       undefined,
-      appSettings.agentRuntime ?? 'claude',
     )
 
     // 绑定
@@ -1261,7 +1263,7 @@ class FeishuBridge {
       }))
 
     if (orphanSessions.length > 0) {
-      wsItems.push({ id: '', name: '未分配空间', sessions: orphanSessions })
+      wsItems.push({ id: '', name: '未分配工作区', sessions: orphanSessions })
     }
 
     await this.sendCardMessage(chatId, buildSessionListCard(wsItems, currentWorkspaceId))
@@ -1351,11 +1353,11 @@ class FeishuBridge {
 
     if (!match) {
       const available = workspaces.map((w, i) => `${i + 1}. ${w.name}`).join(', ')
-      await this.sendMessage(chatId, `未找到空间 "${arg}"。可用: ${available}`)
+      await this.sendMessage(chatId, `未找到工作区 "${arg}"。可用: ${available}`)
       return
     }
 
-    // 清理旧绑定（切换空间后需要用户选择或新建会话）
+    // 清理旧绑定（切换工作区后需要用户选择或新建会话）
     if (binding) {
       this.sessionToChat.delete(binding.sessionId)
       this.chatBindings.delete(chatId)
@@ -1363,7 +1365,7 @@ class FeishuBridge {
       this.saveBindings()
     }
 
-    // 更新 Bot 配置的默认空间（下次自动创建会话时使用）
+    // 更新 Bot 配置的默认工作区（下次自动创建会话时使用）
     const { saveFeishuBotConfig } = await import('./feishu-config')
     saveFeishuBotConfig({
       id: this.botConfig.id,
@@ -1417,7 +1419,7 @@ class FeishuBridge {
     const workspaceId = binding?.workspaceId
     const workspace = workspaceId ? getAgentWorkspace(workspaceId) : undefined
     if (workspace) {
-      lines.push(`**空间**: ${workspace.name} (\`${workspace.slug}\`)`)
+      lines.push(`**工作区**: ${workspace.name} (\`${workspace.slug}\`)`)
 
       // MCP Servers
       const capabilities = getWorkspaceCapabilities(workspace.slug)
@@ -1479,7 +1481,7 @@ class FeishuBridge {
         }
       }
     } else {
-      lines.push('**空间**: 未设置')
+      lines.push('**工作区**: 未设置')
     }
 
     const card: Record<string, unknown> = {
@@ -1609,10 +1611,10 @@ class FeishuBridge {
     // 诊断：附件应保存但 workspace 为空时立即报错（用户能在 Console 看到）
     const hasAnyAttachment = imageAttachments.length > 0 || fileAttachments.length > 0
     if (hasAnyAttachment && !workspace) {
-      console.error(`[飞书 Bridge] 附件保存失败：binding.workspaceId=${binding.workspaceId} 找不到对应空间！图片数=${imageAttachments.length}, 文件数=${fileAttachments.length}`)
+      console.error(`[飞书 Bridge] 附件保存失败：binding.workspaceId=${binding.workspaceId} 找不到对应工作区！图片数=${imageAttachments.length}, 文件数=${fileAttachments.length}`)
     }
     if (hasAnyAttachment && workspace) {
-      console.log(`[飞书 Bridge] 准备保存附件：空间=${workspace.slug}, sessionId=${binding.sessionId.slice(-8)}, 图片数=${imageAttachments.length}, 文件数=${fileAttachments.length}`)
+      console.log(`[飞书 Bridge] 准备保存附件：工作区=${workspace.slug}, sessionId=${binding.sessionId.slice(-8)}, 图片数=${imageAttachments.length}, 文件数=${fileAttachments.length}`)
     }
 
     if (workspace) {
@@ -1729,13 +1731,10 @@ class FeishuBridge {
     })
 
     // fire-and-forget，不阻塞事件回调
-    // 群聊时注入动态 MCP 工具（允许 Agent 主动拉取更多群聊历史）
-    let customMcpServers: Record<string, Record<string, unknown>> | undefined
+    // 群聊时注入绑定 chatId 的 Pi read-only tool，模型无法通过参数跨群读取历史。
+    let piCustomTools: ToolDefinition[] | undefined
     if (msgCtx.chatType === 'group') {
-      const mcpServer = await this.createFeishuChatMcpServer(chatId)
-      if (mcpServer) {
-        customMcpServers = { feishu_chat: mcpServer as unknown as Record<string, unknown> }
-      }
+      piCustomTools = [this.buildPiFeishuChatHistoryTool(chatId)]
     }
 
     // 渠道/模型解析：binding（per-chat 用户在 IM 里切过的）优先，其次 Bot 配置、应用设置
@@ -1750,7 +1749,6 @@ class FeishuBridge {
       modelId,
       workspaceId: binding.workspaceId,
       permissionModeOverride: 'bypassPermissions',
-      ...(customMcpServers && { customMcpServers }),
     }
 
     // 直接 await runAgentHeadless 的 Promise——它会在 orchestrator.sendMessage
@@ -1777,7 +1775,7 @@ class FeishuBridge {
         onTitleUpdated: (_title) => {
           // 标题更新可选通知
         },
-      })
+      }, piCustomTools ? { piCustomTools } : undefined)
     } catch (error) {
       console.error('[飞书 Bridge] Agent 运行异常:', redactSensitiveLogValue(error))
     }
@@ -2371,64 +2369,47 @@ class FeishuBridge {
    *
    * 提供 `fetch_group_chat_history` 工具，让 Agent 可以主动拉取更多群聊历史。
    */
-  private async createFeishuChatMcpServer(
-    chatId: string,
-  ): Promise<Record<string, unknown> | null> {
-    try {
-      const sdk = await import('@anthropic-ai/claude-agent-sdk')
-      const { z } = await import('zod')
+  /**
+   * 构建绑定到当前群 chatId 的 Pi read-only custom tool。chatId 不暴露为模型参数，
+   * 避免任意 tool call 越权读取其他群聊。
+   */
+  private buildPiFeishuChatHistoryTool(chatId: string): ToolDefinition {
+    return {
+      name: 'mcp__feishu_chat__fetch_group_chat_history',
+      label: '读取飞书群聊历史',
+      description: '获取当前飞书群聊的更多历史消息。当需要补充群聊上下文时使用；返回发送者、时间和内容。',
+      promptSnippet: 'Feishu group history: use only when more context from the current group is necessary.',
+      parameters: Type.Object({
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: '要获取的消息数量，默认 20，最多 50。' })),
+        before_timestamp: Type.Optional(Type.Number({ description: '获取此 Unix 毫秒时间戳之前的消息，用于向前翻页。' })),
+      }),
+      execute: async (_toolCallId, args): Promise<AgentToolResult<unknown>> => {
+        const input = args && typeof args === 'object' ? args as Record<string, unknown> : {}
+        const limit = typeof input.limit === 'number' ? input.limit : undefined
+        const beforeTimestamp = typeof input.before_timestamp === 'number' ? input.before_timestamp : undefined
+        const messages = await this.fetchChatHistory(chatId, { pageSize: limit, beforeTimestamp })
+        if (messages.length === 0) {
+          return {
+            content: [{ type: 'text', text: '没有更多历史消息。' }],
+            details: { count: 0 },
+          } as AgentToolResult<unknown>
+        }
 
-      const server = sdk.createSdkMcpServer({
-        name: 'feishu_chat',
-        version: '1.0.0',
-        tools: [
-          sdk.tool(
-            'fetch_group_chat_history',
-            '获取飞书群聊的历史消息。当你需要了解更多群聊上下文来完成任务时使用此工具。' +
-            '返回指定数量的历史消息，包含发送者、时间和内容。',
-            {
-              limit: z.number().min(1).max(50).optional()
-                .describe('要获取的消息数量（默认 20，最多 50）'),
-              before_timestamp: z.number().optional()
-                .describe('获取此时间戳（毫秒）之前的消息，用于向前翻页'),
-            },
-            async (args) => {
-              const messages = await this.fetchChatHistory(chatId, {
-                pageSize: args.limit,
-                beforeTimestamp: args.before_timestamp,
-              })
-
-              if (messages.length === 0) {
-                return {
-                  content: [{ type: 'text' as const, text: '没有更多历史消息。' }],
-                }
-              }
-
-              const formatted = this.formatChatHistoryContext(messages)
-              const oldestTimestamp = messages[0]?.createTime ?? 0
-
-              return {
-                content: [{
-                  type: 'text' as const,
-                  text: `${formatted}\n\n（如需更早的消息，使用 before_timestamp: ${oldestTimestamp}）`,
-                }],
-              }
-            },
-            { annotations: { readOnlyHint: true } },
-          ),
-        ],
-      })
-
-      console.log('[飞书 Bridge] 已创建群聊 MCP 工具')
-      return server as unknown as Record<string, unknown>
-    } catch (error) {
-      console.warn('[飞书 Bridge] 创建群聊 MCP 工具失败:', redactSensitiveLogValue(error))
-      return null
-    }
+        const oldestTimestamp = messages[0]?.createTime
+        const formatted = this.formatChatHistoryContext(messages)
+        return {
+          content: [{
+            type: 'text',
+            text: `${formatted}${oldestTimestamp ? `\n\n（如需更早的消息，使用 before_timestamp: ${oldestTimestamp}）` : ''}`,
+          }],
+          details: { count: messages.length, oldestTimestamp },
+        } as AgentToolResult<unknown>
+      },
+    } as ToolDefinition
   }
 
   /**
-   * 解析消息上下文前缀：[空间名称]->[会话名称]：
+   * 解析消息上下文前缀：[工作区名称]->[会话名称]：
    *
    * 用于在每条回复的飞书消息开头标注来源，方便用户区分。
    */
@@ -2439,7 +2420,7 @@ class FeishuBridge {
     const workspace = binding.workspaceId ? getAgentWorkspace(binding.workspaceId) : undefined
     const session = getAgentSessionMeta(binding.sessionId)
 
-    const wsName = workspace?.name ?? '默认空间'
+    const wsName = workspace?.name ?? '默认工作区'
     const sessName = session?.title ?? binding.sessionId.slice(0, 8)
 
     return `[${wsName}]->[${sessName}]：`
@@ -2453,7 +2434,7 @@ class FeishuBridge {
     const workspace = binding.workspaceId ? getAgentWorkspace(binding.workspaceId) : undefined
     const session = getAgentSessionMeta(binding.sessionId)
 
-    const wsName = workspace?.name ?? '默认空间'
+    const wsName = workspace?.name ?? '默认工作区'
     const sessName = session?.title ?? binding.sessionId.slice(0, 8)
 
     return `${wsName} · ${sessName}`

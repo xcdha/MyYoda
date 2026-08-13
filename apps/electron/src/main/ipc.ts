@@ -5,13 +5,12 @@
  */
 
 import { ipcMain, nativeTheme, shell, dialog, BrowserWindow, app, clipboard, nativeImage } from 'electron'
-import { join, resolve, sep, dirname } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, EXPERT_IPC_CHANNELS, AGENT_THINKING_LEVELS, isMyYodaPermissionMode, normalizePathForCompare, PLANNING_IPC_CHANNELS, RELEASE_NOTES_IPC_CHANNELS, PR_IPC_CHANNELS, type PlanningWorkspaceScope } from '@myyoda/shared'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, EXPERT_IPC_CHANNELS, AGENT_THINKING_LEVELS, isMyYodaPermissionMode, normalizePathForCompare, PLANNING_IPC_CHANNELS, RELEASE_NOTES_IPC_CHANNELS, PR_IPC_CHANNELS, MAX_ATTACHMENT_SIZE, type PlanningWorkspaceScope } from '@myyoda/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, EXCALIDRAW_IPC_CHANNELS, QUICK_TASK_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS, USAGE_IPC_CHANNELS } from '../types'
-import { registerBrowserIpcHandlers } from './lib/browser/browser-ipc'
 import type {
   QuickTaskSubmitInput,
   VoiceDictationAudioChunkInput,
@@ -52,6 +51,7 @@ import type {
   FileOrFolderDialogResult,
   RecentMessagesResult,
   AgentSessionMeta,
+  SetAgentSessionActiveWorktreeInput,
   AgentSendInput,
   AgentRuntime,
   AgentThinkingLevel,
@@ -159,10 +159,17 @@ import type {
   ResolvePlanningNativeSyncConflictInput,
   PlanningSyncProfile,
   SavePlanningSyncProfileInput,
+  BrowserViewState,
+  BrowserViewLayout,
+  BrowserNavigateInput,
+  BrowserTabInput,
+  BrowserCreateTabInput,
 } from '@myyoda/shared'
 import type { ExpertManifest, ExpertPackage } from '@myyoda/shared/experts'
 import type { UserProfile, AppSettings } from '../types'
 import { getRuntimeStatus, getGitRepoStatus, reinitializeRuntime } from './lib/runtime-init'
+import { browserController } from './lib/browser-controller'
+import { resolveBrowserProfileKey } from './lib/browser-profile-policy'
 import {
   getUnstagedChanges,
   invalidateGitDiffCache,
@@ -189,7 +196,7 @@ import {
 } from './lib/pull-request-service'
 import { getGhCliStatus } from './lib/gh-cli'
 import { listGitBranchesForSession, prepareSessionGitContext } from './lib/git-session-context-service'
-import { registerPromaFilePath } from './lib/local-file-protocol'
+import { registerMyYodaDirectoryPath, registerMyYodaFilePath } from './lib/local-file-protocol'
 import { registerUpdaterIpc } from './lib/updater/updater-ipc'
 import {
   listChannels,
@@ -312,6 +319,7 @@ import {
   getAgentSessionSDKMessages,
   updateAgentSessionMeta,
   deleteAgentSession,
+  assertAgentSessionDeletionSafe,
   migrateChatToAgentSession,
   moveSessionToWorkspace,
   forkAgentSession,
@@ -325,7 +333,7 @@ import { spawnExpertCowork } from './lib/agent-cowork'
 import { permissionService } from './lib/agent-permission-service'
 import { askUserService } from './lib/agent-ask-user-service'
 import { exitPlanService } from './lib/agent-exit-plan-service'
-import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getExcalidrawDir, getExpertsDir, getDefaultExpertTemplatesDir } from './lib/config-paths'
+import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getConfigDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getExcalidrawDir, getExpertsDir, getDefaultExpertTemplatesDir } from './lib/config-paths'
 import { resolveAgentSessionFileRoots } from './lib/agent-file-roots'
 import { listSessionOutputs } from './lib/agent-output-capture'
 import { getAgentWorkspacePath } from './lib/config-paths'
@@ -339,6 +347,7 @@ import {
   createAgentWorkspace,
   updateAgentWorkspace,
   deleteAgentWorkspace,
+  assertAgentWorkspaceDeletionSafe,
   reorderAgentWorkspaces,
   ensureDefaultWorkspace,
   getWorkspaceMcpConfig,
@@ -383,6 +392,7 @@ import {
   getWorkspaceDefaultWorkingDirectory,
   setWorkspaceDefaultWorkingDirectory,
 } from './lib/agent-workspace-manager'
+import { deleteWorkspaceCascade } from './lib/workspace-deletion-service'
 import {
   getOrganizationConnection,
   setOrganizationConnection,
@@ -448,12 +458,13 @@ import { feishuBridgeManager } from './lib/feishu-bridge-manager'
 import { syncFeishuSyncSleepBlocker } from './lib/feishu-sleep-blocker'
 import { presenceService } from './lib/feishu-presence'
 import { getDingTalkConfig, saveDingTalkConfig, getDecryptedClientSecret, getDingTalkMultiBotConfig, saveDingTalkBotConfig, removeDingTalkBot, getDecryptedBotClientSecret } from './lib/dingtalk-config'
+import { listShallowDirectory } from './lib/directory-listing'
 import { dingtalkBridgeManager } from './lib/dingtalk-bridge-manager'
 import { getWeChatConfig } from './lib/wechat-config'
 import { wechatBridge } from './lib/wechat-bridge'
-
-/** 文件浏览器中需要隐藏的系统文件 */
-const HIDDEN_FS_ENTRIES = new Set(['.DS_Store', 'Thumbs.db'])
+import { normalizeFileAccessOptions } from './lib/file-access-policy'
+import { isSafeDeleteTarget } from './lib/destructive-file-policy'
+import { getWorkspaceMetadataDirNames } from './lib/storage-boundaries'
 
 /** 已知编辑器应用名称白名单（macOS） */
 const KNOWN_EDITORS = [
@@ -477,8 +488,10 @@ function realpathOrResolve(path: string): string {
 }
 
 function getAuthorizedRoots(options?: FileAccessOptions): string[] {
+  const hasSessionContext = !!(options?.sessionId || options?.workspaceSlug)
   const roots: string[] = [
-    getAgentWorkspacesDir(),
+    // 无会话上下文时保留全局根供文件面板浏览；有会话时只按具体工作区授权。
+    ...(hasSessionContext ? [] : [getAgentWorkspacesDir()]),
     join(tmpdir(), 'myyoda-preview'),
   ]
 
@@ -489,6 +502,9 @@ function getAuthorizedRoots(options?: FileAccessOptions): string[] {
     if (meta?.attachedDirectories) {
       roots.push(...meta.attachedDirectories)
     }
+    if (meta?.activeWorktree?.path) {
+      roots.push(meta.activeWorktree.path)
+    }
     if (meta?.attachedFiles) {
       roots.push(...meta.attachedFiles)
     }
@@ -496,9 +512,16 @@ function getAuthorizedRoots(options?: FileAccessOptions): string[] {
     // 查找因项目被删除/改名等原因失败，已建立的 Git 上下文也不应该突然失去访问权限。
     if (meta?.gitRepoPath) roots.push(meta.gitRepoPath)
     if (meta?.gitWorktreePath) roots.push(meta.gitWorktreePath)
+    // 会话已显式解析/绑定的工作目录也要授权；未绑定 Project 或 Git 上下文的
+    // 任务会话仍可能以 workingDirectory 作为 SidePanel / Diff / 文件打开的根。
+    if (meta?.workingDirectory) roots.push(meta.workingDirectory)
     if (meta?.workspaceId) {
       const workspace = getAgentWorkspace(meta.workspaceId)
-      if (workspace?.slug) workspaceSlugs.add(workspace.slug)
+      if (workspace?.slug) {
+        workspaceSlugs.add(workspace.slug)
+        // 有会话归属时，当前工作区的 agent-workspaces/{slug}/ 也是合法根。
+        roots.push(getAgentWorkspacePath(workspace.slug))
+      }
       // 会话绑定的 Project（Git 项目）工作目录也要授权，否则新会话选择 Git 分支/创建
       // Worktree 时，ensurePathAllowedWithWorktree 永远无法通过校验——这里之前完全没有
       // 打通 sessionMeta.projectId → project.config.workingDirectory 这条链路，是
@@ -539,22 +562,7 @@ function isPathAllowed(filePath: string, options?: FileAccessOptions): boolean {
   } catch {
     return false
   }
-  // 文件面板应反映 Agent 实际可访问的路径。调用方已明确开启 unrestricted 时，
-  // 保留 realpath 校验以拒绝不存在的目标，但不再按会话附件重复收窄范围。
-  if (options?.unrestricted) return true
   return getAuthorizedRoots(options).some((root) => isUnderRoot(resolved, root))
-}
-
-function normalizeFileAccessOptions(value?: FileAccessOptions | string[]): FileAccessOptions | undefined {
-  if (!value || Array.isArray(value) || typeof value !== 'object') return undefined
-  return {
-    sessionId: typeof value.sessionId === 'string' ? value.sessionId : undefined,
-    workspaceSlug: typeof value.workspaceSlug === 'string' ? value.workspaceSlug : undefined,
-    candidateBasePaths: Array.isArray(value.candidateBasePaths)
-      ? value.candidateBasePaths.filter((p): p is string => typeof p === 'string' && p.length > 0)
-      : undefined,
-    unrestricted: value.unrestricted === true,
-  }
 }
 
 function getWorkspaceSlugsForAccess(options?: FileAccessOptions): string[] {
@@ -572,9 +580,45 @@ function getWorkspaceSlugsForAccess(options?: FileAccessOptions): string[] {
   return Array.from(workspaceSlugs)
 }
 
+function getManagedSkillBasePath(options?: FileAccessOptions): string | undefined {
+  const workspaceSlug = options?.workspaceSkillSlug
+  if (!workspaceSlug || !getWorkspaceSlugsForAccess(options).includes(workspaceSlug)) return undefined
+  const workspace = listAgentWorkspaces().find((item) => item.slug === workspaceSlug)
+  return workspace ? getWorkspaceSkillsDir(workspace.slug) : undefined
+}
+
 function getAllowedCandidateBasePaths(options?: FileAccessOptions): string[] | undefined {
-  const allowed = options?.candidateBasePaths?.filter((p) => isPathAllowed(p, options)) ?? []
+  const allowed = (getPreviewCandidateBasePaths(options) ?? []).filter((p) => isPathAllowed(p, options))
   return allowed.length > 0 ? allowed : undefined
+}
+
+function getLegacySkillBasePath(options?: FileAccessOptions): string | undefined {
+  const legacyFilePath = options?.legacySkillFilePath
+  if (!legacyFilePath) return undefined
+  const normalized = legacyFilePath.replace(/\\/g, '/')
+  return normalized.match(/^(.*\/skills)\/[^/]+\/SKILL\.md$/i)?.[1]
+}
+
+function getPreviewCandidateBasePaths(options?: FileAccessOptions): string[] | undefined {
+  const bases = options?.candidateBasePaths?.filter((p) => typeof p === 'string' && p.length > 0) ?? []
+  const managedSkillBasePath = getManagedSkillBasePath(options)
+  if (managedSkillBasePath && !bases.includes(managedSkillBasePath)) {
+    bases.unshift(managedSkillBasePath)
+  }
+  const legacySkillBasePath = getLegacySkillBasePath(options)
+  if (legacySkillBasePath && !bases.includes(legacySkillBasePath)) {
+    bases.push(legacySkillBasePath)
+  }
+  return bases.length > 0 ? bases : undefined
+}
+
+/** Resolve preview-only relative paths before handing them to OS-level file actions. */
+async function resolveFileAccessPath(filePath: string, options?: FileAccessOptions): Promise<string> {
+  const [{ resolve }, { resolveFilePath }] = await Promise.all([
+    import('node:path'),
+    import('./lib/file-preview-service'),
+  ])
+  return resolveFilePath(filePath, getPreviewCandidateBasePaths(options)) ?? resolve(filePath)
 }
 
 async function getAccessRootMainRepo(root: string): Promise<string | null> {
@@ -916,10 +960,9 @@ async function getWindowsDefaultAppInfo(filePath: string): Promise<{ appPath: st
 
 async function getDefaultAppInfoForFile(
   filePath: string,
-  _options?: FileAccessOptions,
+  options?: FileAccessOptions,
 ): Promise<import('@myyoda/shared').DefaultAppInfo | null> {
-  const { resolve } = await import('node:path')
-  const absPath = resolve(filePath)
+  const absPath = await resolveFileAccessPath(filePath, options)
 
   const cacheKey = `${process.platform}:${extOf(filePath) || filePath}`
   const cachedInfo = defaultAppCache.get(cacheKey) ?? getCachedDefaultAppInfo(cacheKey)
@@ -1014,7 +1057,8 @@ function cacheNull(key: string): null {
 }
 
 function isAgentRuntime(value: unknown): value is AgentRuntime {
-  return value === 'claude' || value === 'pi'
+  // Pi-only：所有 runtime 值归一化为 'pi'，历史 'claude' 仅用于兼容读取。
+  return value === 'pi' || value === 'claude'
 }
 
 /**
@@ -1335,9 +1379,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.SYSTEM_OPEN_FILE,
     async (_, filePath: string, appName?: string, access?: FileAccessOptions | string[]): Promise<void> => {
-      const { resolve } = await import('node:path')
-      const absPath = resolve(filePath)
       const options = normalizeFileAccessOptions(access)
+      const absPath = await resolveFileAccessPath(filePath, options)
       if (!isPathAllowed(absPath, options)) {
         console.warn('[IPC] shell:system-open-file 拒绝越界路径:', absPath)
         return
@@ -1388,12 +1431,13 @@ export function registerIpcHandlers(): void {
       if (!filePath || typeof filePath !== 'string') return null
       try {
         const options = normalizeFileAccessOptions(access)
-        if (options && !isPathAllowed(filePath, options)) {
-          console.warn('[IPC] shell:get-default-app-for-file 拒绝越界路径:', filePath)
+        const resolvedPath = await resolveFileAccessPath(filePath, options)
+        if (options && !isPathAllowed(resolvedPath, options)) {
+          console.warn('[IPC] shell:get-default-app-for-file 拒绝越界路径:', resolvedPath)
           return null
         }
-        console.log('[IPC] get-default-app-for-file 收到请求:', filePath)
-        const result = await getDefaultAppInfoForFile(filePath, options)
+        console.log('[IPC] get-default-app-for-file 收到请求:', resolvedPath)
+        const result = await getDefaultAppInfoForFile(resolvedPath, options)
         console.log('[IPC] get-default-app-for-file 返回:', result ? `name=${result.name} appPath=${result.appPath} iconLen=${result.iconDataUrl?.length}` : 'null')
         return result
       } catch (err) {
@@ -2509,13 +2553,97 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.CREATE_SESSION,
     async (_, title?: string, channelId?: string, workspaceId?: string, modelId?: string): Promise<AgentSessionMeta> => {
-      const session = createAgentSession(title, channelId, workspaceId, modelId, getSettings().agentRuntime ?? 'pi')
+      const session = createAgentSession(title, channelId, workspaceId, modelId, undefined)
       feishuBridgeManager.ensureSessionMirror(session).catch((error) => {
         console.error('[飞书 Session 镜像] 新会话建群失败:', error)
       })
       return session
     }
   )
+
+  // 受管浏览器：renderer 只能投影状态和更新 slot 布局，不能取得 WebContents/CDP。
+  const assertMainRenderer = async (senderId: number): Promise<void> => {
+    const { getMainWindow } = await import('./index')
+    const mainWindow = getMainWindow()
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.id !== senderId) {
+      throw new Error('仅主窗口可以操作受管浏览器。')
+    }
+  }
+  const assertBrowserSessionAccess = async (senderId: number, sessionId: string): Promise<void> => {
+    await assertMainRenderer(senderId)
+    const session = getAgentSessionMeta(sessionId)
+    if (!session) throw new Error('Agent 会话不存在。')
+    // 自动任务与协作子会话同样可以使用受管浏览器；仅校验会话仍存在。
+    browserController.configureSession(sessionId, {
+      profileKey: resolveBrowserProfileKey(session.workspaceId, sessionId),
+      executionSource: session.sourceDelegationId ? 'delegation' : session.sourceAutomationId ? 'automation' : 'user',
+    })
+  }
+
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.OPEN_BROWSER,
+    async (event, sessionId: string): Promise<BrowserViewState> => {
+      await assertBrowserSessionAccess(event.sender.id, sessionId)
+      return browserController.open(sessionId)
+    },
+  )
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.GET_BROWSER_STATE,
+    async (event, sessionId: string): Promise<BrowserViewState | null> => {
+      await assertBrowserSessionAccess(event.sender.id, sessionId)
+      return browserController.getState(sessionId)
+    },
+  )
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.SET_BROWSER_LAYOUT,
+    async (event, layout: BrowserViewLayout): Promise<void> => {
+      if (!layout || typeof layout.sessionId !== 'string' || !layout.bounds || !Number.isSafeInteger(layout.revision)) throw new Error('无效的浏览器布局。')
+      await assertBrowserSessionAccess(event.sender.id, layout.sessionId)
+      browserController.setLayout(layout)
+    },
+  )
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.NAVIGATE_BROWSER,
+    async (event, input: BrowserNavigateInput): Promise<BrowserViewState> => {
+      await assertBrowserSessionAccess(event.sender.id, input.sessionId)
+      return browserController.navigateDisplay(input.sessionId, input.url, input.tabId)
+    },
+  )
+  ipcMain.handle(AGENT_IPC_CHANNELS.GO_BACK_BROWSER, async (event, sessionId: string) => {
+    await assertBrowserSessionAccess(event.sender.id, sessionId)
+    return browserController.goBackDisplay(sessionId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.GO_FORWARD_BROWSER, async (event, sessionId: string) => {
+    await assertBrowserSessionAccess(event.sender.id, sessionId)
+    return browserController.goForwardDisplay(sessionId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.RELOAD_BROWSER, async (event, sessionId: string) => {
+    await assertBrowserSessionAccess(event.sender.id, sessionId)
+    return browserController.reloadDisplay(sessionId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.CLOSE_BROWSER, async (event, sessionId: string): Promise<void> => {
+    await assertBrowserSessionAccess(event.sender.id, sessionId)
+    await browserController.close(sessionId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.LIST_BROWSER_TABS, async (event, sessionId: string): Promise<BrowserViewState> => {
+    await assertBrowserSessionAccess(event.sender.id, sessionId)
+    return browserController.listTabs(sessionId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.CREATE_BROWSER_TAB, async (event, input: BrowserCreateTabInput): Promise<BrowserViewState> => {
+    await assertBrowserSessionAccess(event.sender.id, input.sessionId)
+    return browserController.createDisplayTab(input.sessionId, input.url)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.SELECT_BROWSER_TAB, async (event, input: BrowserTabInput): Promise<BrowserViewState> => {
+    await assertBrowserSessionAccess(event.sender.id, input.sessionId)
+    if (!input.tabId) throw new Error('tabId 必填。')
+    return browserController.selectTab(input.sessionId, input.tabId)
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.CLOSE_BROWSER_TAB, async (event, input: BrowserTabInput): Promise<BrowserViewState | null> => {
+    await assertBrowserSessionAccess(event.sender.id, input.sessionId)
+    if (!input.tabId) throw new Error('tabId 必填。')
+    return browserController.closeTab(input.sessionId, input.tabId)
+  })
+
 
   // 获取 Agent 会话 SDKMessage（Phase 4 新格式）
   ipcMain.handle(
@@ -2540,6 +2668,43 @@ export function registerIpcHandlers(): void {
       // 模型切换允许在运行中提交；当前 query 继续使用启动时的模型，下一轮读取新配置。
       return updateAgentSessionMeta(id, { channelId, modelId })
     }
+  )
+
+  // 选择或清除 Agent 会话的活动 worktree
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.SET_ACTIVE_WORKTREE,
+    async (_, input: SetAgentSessionActiveWorktreeInput): Promise<AgentSessionMeta> => {
+      if (!input || typeof input.sessionId !== 'string' || (input.worktreePath !== null && typeof input.worktreePath !== 'string')) {
+        throw new Error('活动 worktree 参数无效')
+      }
+      const session = getAgentSessionMeta(input.sessionId)
+      if (!session) throw new Error(`Agent 会话不存在: ${input.sessionId}`)
+      if (input.worktreePath === null) {
+        return updateAgentSessionMeta(input.sessionId, { activeWorktree: undefined })
+      }
+
+      const access = normalizeFileAccessOptions({ sessionId: input.sessionId })
+      if (!(await ensurePathAllowedWithWorktree(input.worktreePath, access))) {
+        throw new Error('无权将该目录设为活动 worktree')
+      }
+
+      const requestedPath = normalizePathForCompare(realpathOrResolve(input.worktreePath))
+      const selected = (await listWorktrees(input.worktreePath)).find((worktree) =>
+        !worktree.isMain && normalizePathForCompare(realpathOrResolve(worktree.path)) === requestedPath,
+      )
+      if (!selected) throw new Error('指定目录不是可用的 linked worktree')
+
+      const mainRepoRoot = await getMainRepoRoot(selected.path)
+      if (!mainRepoRoot) throw new Error('无法确认 worktree 的主仓库')
+      return updateAgentSessionMeta(input.sessionId, {
+        activeWorktree: {
+          path: realpathOrResolve(selected.path),
+          mainRepoRoot: realpathOrResolve(mainRepoRoot),
+          branch: selected.branch,
+          selectedAt: Date.now(),
+        },
+      })
+    },
   )
 
   // 生成 Agent 会话标题
@@ -2569,6 +2734,8 @@ export function registerIpcHandlers(): void {
         askUserService.clearSessionPending(sessionId)
         // 清理 ExitPlanMode 服务中的待处理请求
         exitPlanService.clearSessionPending(sessionId)
+        // 清理受管浏览器会话
+        await browserController.close(sessionId)
         deleteAgentSession(sessionId)
       }
     }
@@ -2732,40 +2899,20 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.DELETE_WORKSPACE,
     async (_, id: string): Promise<void> => {
-      const deletingWorkspace = getAgentWorkspace(id)
-      if (!deletingWorkspace) {
-        return deleteAgentWorkspace(id)
-      }
-
-      // 守卫前置：在删除任何会话/自动任务前就拦截不可删除的工作区，
-      // 否则会先把绑定数据删光、再由 deleteAgentWorkspace 抛错，造成数据丢失与状态不一致
-      if (deletingWorkspace.slug === 'default') {
-        throw new Error('默认空间不能删除')
-      }
-      if (listAgentWorkspaces().length <= 1) {
-        throw new Error('至少需要保留一个空间')
-      }
-
-      const affectedSessionIds = listAgentSessions()
-        .filter((session) => session.workspaceId === id)
-        .map((session) => session.id)
-      const affectedAutomationIds = listAutomations()
-        .filter((automation) => automation.workspaceId === id)
-        .map((automation) => automation.id)
-
-      for (const sessionId of affectedSessionIds) {
-        if (isAgentSessionActive(sessionId)) {
-          stopAgent(sessionId)
-        }
-        deleteAgentSession(sessionId)
-      }
-      for (const automationId of affectedAutomationIds) {
-        deleteAutomation(automationId)
-      }
-      if (affectedAutomationIds.length > 0) {
-        broadcastAutomationsChanged()
-      }
-      deleteAgentWorkspace(id)
+      deleteWorkspaceCascade(id, {
+        getWorkspace: getAgentWorkspace,
+        listWorkspaces: listAgentWorkspaces,
+        listSessions: listAgentSessions,
+        listAutomations,
+        isSessionActive: isAgentSessionActive,
+        assertSessionDeletionSafe: assertAgentSessionDeletionSafe,
+        assertWorkspaceDeletionSafe: assertAgentWorkspaceDeletionSafe,
+        stopSession: stopAgent,
+        deleteSession: deleteAgentSession,
+        deleteAutomation,
+        broadcastAutomationsChanged,
+        deleteWorkspace: deleteAgentWorkspace,
+      })
     }
   )
 
@@ -3388,29 +3535,8 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(
     AGENT_IPC_CHANNELS.UPDATE_SESSION_AGENT_RUNTIME,
-    async (_, sessionId: string, runtime: AgentRuntime): Promise<AgentSessionMeta> => {
-      if (!isAgentRuntime(runtime)) {
-        throw new Error(`无效的 Agent runtime: ${String(runtime)}`)
-      }
-      const current = getAgentSessionMeta(sessionId)
-      if (!current) {
-        throw new Error(`Agent 会话不存在: ${sessionId}`)
-      }
-
-      if (isAgentSessionActive(sessionId)) {
-        throw new Error('Agent 正在运行，完成后再切换内核')
-      }
-
-      // 历史会话缺失 runtime 时按 Claude 处理，避免将 Claude SDK 会话 ID 交给 Pi 恢复。
-      const previousRuntime: AgentRuntime = isAgentRuntime(current.agentRuntime) ? current.agentRuntime : 'claude'
-      const updates: Partial<Pick<AgentSessionMeta, 'agentRuntime' | 'sdkSessionId'>> = {
-        agentRuntime: runtime,
-      }
-      if (previousRuntime !== runtime) {
-        updates.sdkSessionId = undefined
-      }
-
-      return updateAgentSessionMeta(sessionId, updates)
+    async (): Promise<AgentSessionMeta> => {
+      throw new Error('Agent runtime 已统一为 Pi，不支持内核切换。')
     }
   )
 
@@ -3867,44 +3993,16 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.LIST_DIRECTORY,
     async (_, dirPath: string, access?: FileAccessOptions): Promise<FileEntry[]> => {
-      const { existsSync, readdirSync, statSync } = await import('node:fs')
-      const { resolve } = await import('node:path')
-
       const safePath = resolve(dirPath)
-      // 目录可能已被删除（如删除 Agent 会话后面板仍持有旧路径），优雅返回空列表
-      if (!existsSync(safePath)) {
-        return []
-      }
+      // 目录可能已被删除（如删除 Agent 会话后面板仍持有旧路径），优雅返回空列表。
+      if (!existsSync(safePath)) return []
       if (!isPathAllowed(safePath, normalizeFileAccessOptions(access))) {
+        // 路径可能刚好在 existsSync 与 realpath 校验之间被删除。
+        if (!existsSync(safePath)) return []
         throw new Error('访问路径超出当前会话的授权范围')
       }
 
-      const entries: FileEntry[] = []
-      const items = readdirSync(safePath, { withFileTypes: true })
-
-      for (const item of items) {
-        if (HIDDEN_FS_ENTRIES.has(item.name)) continue
-        const fullPath = resolve(safePath, item.name)
-        const isDirectory = item.isDirectory()
-        const size = isDirectory ? undefined : statSync(fullPath).size
-        entries.push({
-          name: item.name,
-          path: fullPath,
-          isDirectory,
-          size,
-        })
-      }
-
-      // 目录在前，文件在后；隐藏文件（.开头）排在同类末尾，各自按名称排序
-      entries.sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-        const aHidden = a.name.startsWith('.')
-        const bHidden = b.name.startsWith('.')
-        if (aHidden !== bHidden) return aHidden ? 1 : -1
-        return a.name.localeCompare(b.name)
-      })
-
-      return entries
+      return listShallowDirectory(safePath)
     }
   )
 
@@ -3915,9 +4013,33 @@ export function registerIpcHandlers(): void {
       const { rmSync } = await import('node:fs')
       const { resolve } = await import('node:path')
 
+      const options = normalizeFileAccessOptions(access)
       const safePath = resolve(filePath)
-      if (!isPathAllowed(safePath, normalizeFileAccessOptions(access))) {
+      if (!isPathAllowed(safePath, options)) {
         throw new Error('访问路径超出当前会话的授权范围')
+      }
+
+      const allowedRoots = getAuthorizedRoots(options)
+      const forbiddenRoots = listAgentWorkspaces().flatMap((workspace) => {
+        const workspaceRoot = getAgentWorkspacePath(workspace.slug)
+        return [
+          workspaceRoot,
+          ...getWorkspaceMetadataDirNames().map((dirname) => join(workspaceRoot, dirname)),
+        ]
+      })
+      if (options?.sessionId) {
+        const meta = getAgentSessionMeta(options.sessionId)
+        const workspace = meta?.workspaceId ? getAgentWorkspace(meta.workspaceId) : undefined
+        if (workspace) {
+          forbiddenRoots.push(getAgentSessionWorkspacePath(workspace.slug, options.sessionId))
+        }
+      }
+      if (!isSafeDeleteTarget(
+        realpathOrResolve(safePath),
+        forbiddenRoots.map(realpathOrResolve),
+        allowedRoots.map(realpathOrResolve),
+      )) {
+        throw new Error('不能删除 Workspace、Session 或其他受管访问根目录')
       }
 
       rmSync(safePath, { recursive: true, force: true })
@@ -4047,7 +4169,7 @@ export function registerIpcHandlers(): void {
   // 解析文件路径并读取内容（供内联预览使用）
   ipcMain.handle(
     'file:resolve-and-read',
-    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<{ resolvedPath: string; content: string } | null> => {
+    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<{ resolvedPath: string; content: string; isBinary: boolean; isTooLarge: boolean } | null> => {
       const { resolveAndReadFile, resolveFilePath } = await import('./lib/file-preview-service')
       const options = normalizeFileAccessOptions(access)
       const allowedBasePaths = getAllowedCandidateBasePaths(options)
@@ -4080,7 +4202,7 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // 仅解析文件路径（供 PDF/图片等用 file:// 加载）
+  // 仅解析文件路径（供 PDF/图片等用 myyoda-file:// 加载）
   ipcMain.handle(
     'file:resolve-path',
     async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<ResolvedFileUrl | null> => {
@@ -4092,12 +4214,31 @@ export function registerIpcHandlers(): void {
         return null
       }
       if (!result) return null
-      // registerPromaFilePath 对目录路径会抛「不是文件」。渲染端（如悬浮预览解析 markdown
+      // registerMyYodaFilePath 对目录路径会抛「不是文件」。渲染端（如悬浮预览解析 markdown
       // 链接）可能传入目录路径，此处优雅降级为 null，而不是让异常冒泡成未捕获的 handler 错误。
       try {
-        return { url: registerPromaFilePath(result) }
+        return { url: registerMyYodaFilePath(result) }
       } catch (err) {
         console.warn('[IPC] file:resolve-path 无法注册为文件，跳过:', result, err instanceof Error ? err.message : err)
+        return null
+      }
+    }
+  )
+
+  // 为 HTML 预览注册所在目录，使相对 CSS、脚本和图片资源保持可加载。
+  // 返回的仍是 token-gated myyoda-file URL，不向渲染进程泄露本机绝对路径。
+  ipcMain.handle(
+    'file:resolve-html-preview-path',
+    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<ResolvedFileUrl | null> => {
+      const { resolveFilePath } = await import('./lib/file-preview-service')
+      const options = normalizeFileAccessOptions(access)
+      const result = resolveFilePath(filePath, getPreviewCandidateBasePaths(options))
+      if (!result) return null
+      try {
+        const directoryUrl = registerMyYodaDirectoryPath(dirname(result))
+        return { url: `${directoryUrl}/${encodeURIComponent(basename(result))}` }
+      } catch (err) {
+        console.warn('[IPC] file:resolve-html-preview-path 无法注册预览目录，跳过:', result, err instanceof Error ? err.message : err)
         return null
       }
     }
@@ -4180,7 +4321,7 @@ export function registerIpcHandlers(): void {
       const resolved = resolveFilePath(filePath, getAllowedCandidateBasePaths(options))
       if (!resolved || !isPathAllowed(resolved, options)) return null
       const st = statSync(resolved)
-      if (maxSize && st.size > maxSize) return null
+      if (st.size > MAX_ATTACHMENT_SIZE) return null
       return readFileSync(resolved).toString('base64')
     }
   )
@@ -4231,40 +4372,15 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     AGENT_IPC_CHANNELS.LIST_ATTACHED_DIRECTORY,
     async (_, dirPath: string, access?: FileAccessOptions | string[]): Promise<FileEntry[]> => {
-      const { readdirSync, statSync } = await import('node:fs')
-      const { resolve } = await import('node:path')
-
       const safePath = resolve(dirPath)
       const options = normalizeFileAccessOptions(access)
       if (!isPathAllowed(safePath, options)) {
+        // 已解绑或被删除的附加目录不应让文件面板持续报错。
+        if (!existsSync(safePath)) return []
         throw new Error('访问路径不在允许范围内')
       }
-      const entries: FileEntry[] = []
-      const items = readdirSync(safePath, { withFileTypes: true })
 
-      for (const item of items) {
-        if (HIDDEN_FS_ENTRIES.has(item.name)) continue
-        const fullPath = resolve(safePath, item.name)
-        const isDirectory = item.isDirectory()
-        const size = isDirectory ? undefined : statSync(fullPath).size
-        entries.push({
-          name: item.name,
-          path: fullPath,
-          isDirectory,
-          size,
-        })
-      }
-
-      // 目录在前，文件在后；隐藏文件（.开头）排在同类末尾
-      entries.sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-        const aHidden = a.name.startsWith('.')
-        const bHidden = b.name.startsWith('.')
-        if (aHidden !== bHidden) return aHidden ? 1 : -1
-        return a.name.localeCompare(b.name)
-      })
-
-      return entries
+      return listShallowDirectory(safePath)
     }
   )
 
@@ -5181,14 +5297,6 @@ export function registerIpcHandlers(): void {
     return getAgentUsageStats(range ?? 'all')
   })
 
-  // 迁移取消时清理临时解压目录
-  ipcMain.handle('migration:cancelImport', async (_, tempDir: string) => {
-    if (tempDir && existsSync(tempDir) && tempDir.includes('myyoda-import-')) {
-      rmSync(tempDir, { recursive: true, force: true })
-      console.log(`[迁移] 已清理临时目录: ${tempDir}`)
-    }
-  })
-
   // 启动时自动清理临时文件
   const runStartupCleanup = async (): Promise<void> => {
     try {
@@ -5434,61 +5542,10 @@ export function registerIpcHandlers(): void {
 
   // ===== 数据迁移 =====
 
-  ipcMain.handle('migration:getExportPreview', async (_, workspaceId: string) => {
-    const { getExportPreview } = await import('./lib/migration-service')
-    return getExportPreview(workspaceId)
-  })
-
-  ipcMain.handle('migration:getShareExportPreview', async () => {
-    const { getShareExportPreview } = await import('./lib/migration-service')
-    return getShareExportPreview()
-  })
-
-  ipcMain.handle('migration:export', async (_, options) => {
-    const { exportData } = await import('./lib/migration-service')
-    return exportData(options)
-  })
-
-  ipcMain.handle('migration:exportV2', async (_, options) => {
-    const { exportDataV2 } = await import('./lib/migration-service')
-    return exportDataV2(options)
-  })
-
-  ipcMain.handle('migration:parseImportFile', async (_, filePath: string) => {
-    const { parseImportFile } = await import('./lib/migration-service')
-    return parseImportFile(filePath)
-  })
-
-  ipcMain.handle('migration:confirmImport', async (_, options) => {
-    const { confirmImport } = await import('./lib/migration-service')
-    return confirmImport(options)
-  })
-
-  ipcMain.handle('migration:openFileDialog', async () => {
-    const { dialog } = await import('electron')
-    const result = await dialog.showOpenDialog({
-      title: '选择迁移文件',
-      filters: [
-        { name: 'MyYoda 迁移文件', extensions: ['myyoda-backup', 'myyoda-share'] },
-        { name: '所有文件', extensions: ['*'] },
-      ],
-      properties: ['openFile'],
-    })
-    return result.canceled ? null : result.filePaths[0]
-  })
-
-  ipcMain.handle('migration:saveFileDialog', async (_, mode: string) => {
-    const { dialog } = await import('electron')
-    const ext = mode === 'personal' ? 'myyoda-backup' : 'myyoda-share'
-    const defaultName = `myyoda-migration-${new Date().toISOString().slice(0, 10)}.${ext}`
-    const result = await dialog.showSaveDialog({
-      title: '保存迁移文件',
-      defaultPath: defaultName,
-      filters: [
-        { name: mode === 'personal' ? 'MyYoda 个人备份' : 'MyYoda 分享包', extensions: [ext] },
-      ],
-    })
-    return result.canceled ? null : result.filePath
+  ipcMain.handle('migration:open-data-folder', async (): Promise<void> => {
+    const dataDir = getConfigDir()
+    const error = await shell.openPath(dataDir)
+    if (error) throw new Error(`无法打开 MyYoda 数据文件夹：${error}`)
   })
 
   // ===== 窗口控制（Windows 自定义标题栏按钮）=====
@@ -5611,7 +5668,7 @@ export function registerIpcHandlers(): void {
       input.channelId,
       input.workspaceId,
       input.modelId,
-      getSettings().agentRuntime ?? 'pi',
+      undefined,
     )
     touchTodoSession(todo.id, session.id)
     broadcastPlanningChanged(['todos'])
@@ -5760,7 +5817,7 @@ export function registerIpcHandlers(): void {
   })
   ipcMain.handle(PLANNING_IPC_CHANNELS.LIST_NATIVE_SYNC_CONFLICTS, async (): Promise<PlanningNativeSyncConflict[]> => listPlanningNativeSyncConflicts())
   ipcMain.handle(PLANNING_IPC_CHANNELS.RESOLVE_NATIVE_SYNC_CONFLICT, async (_, input: ResolvePlanningNativeSyncConflictInput): Promise<boolean> => {
-    if (!input || typeof input.id !== 'string' || !['keep_proma', 'keep_system'].includes(input.resolution)) throw new Error('冲突解决参数非法')
+    if (!input || typeof input.id !== 'string' || !['keep_myyoda', 'keep_system'].includes(input.resolution)) throw new Error('冲突解决参数非法')
     const resolved = resolvePlanningNativeSyncConflict(input)
     if (resolved) { broadcastPlanningChanged(['todos', 'calendar_events']); void runPlanningNativeSync(true) }
     return resolved
@@ -5810,7 +5867,7 @@ export function registerIpcHandlers(): void {
     }
   }
 
-  const validateAutomationFields = (i: Partial<CreateAutomationInput | UpdateAutomationInput>): void => {
+  const validateAutomationFields = (i: Partial<UpdateAutomationInput>): void => {
     if (i.scheduleType !== undefined && !validScheduleType(i.scheduleType)) {
       throw new Error(`非法的 scheduleType: ${String(i.scheduleType)}`)
     }
@@ -5819,6 +5876,15 @@ export function registerIpcHandlers(): void {
     }
     if (i.timeOfDay !== undefined && !validTimeOfDay(i.timeOfDay)) {
       throw new Error(`非法的 timeOfDay: ${String(i.timeOfDay)}`)
+    }
+    if (i.activeWindowStart !== undefined && i.activeWindowStart !== null && !validTimeOfDay(i.activeWindowStart)) {
+      throw new Error(`非法的 activeWindowStart: ${String(i.activeWindowStart)}`)
+    }
+    if (i.activeWindowEnd !== undefined && i.activeWindowEnd !== null && !validTimeOfDay(i.activeWindowEnd)) {
+      throw new Error(`非法的 activeWindowEnd: ${String(i.activeWindowEnd)}`)
+    }
+    if (i.activeWeekdays !== undefined && i.activeWeekdays !== null && (!Array.isArray(i.activeWeekdays) || i.activeWeekdays.some((day) => !isFiniteInt(day) || day < 0 || day > 6))) {
+      throw new Error(`非法的 activeWeekdays: ${String(i.activeWeekdays)}`)
     }
     if (i.dayOfWeek !== undefined && (!isFiniteInt(i.dayOfWeek) || i.dayOfWeek < 0 || i.dayOfWeek > 6)) {
       throw new Error(`非法的 dayOfWeek: ${String(i.dayOfWeek)}`)
@@ -5832,9 +5898,7 @@ export function registerIpcHandlers(): void {
     if (i.maxRuns !== undefined && (!isFiniteInt(i.maxRuns) || i.maxRuns < 1)) {
       throw new Error(`非法的 maxRuns: ${String(i.maxRuns)}`)
     }
-    if (i.agentRuntime !== undefined && !isAgentRuntime(i.agentRuntime)) {
-      throw new Error(`非法的 agentRuntime: ${String(i.agentRuntime)}`)
-    }
+    // agentRuntime 字段已随 Claude runtime 退役移除。
     if (i.permissionMode !== undefined && !validPermissionMode(i.permissionMode)) {
       throw new Error(`非法的 permissionMode: ${String(i.permissionMode)}`)
     }
@@ -5844,29 +5908,45 @@ export function registerIpcHandlers(): void {
     validateAutomationNotificationTargets(i.notificationTargets)
   }
 
+  // Claude runtime 已退役，所有自动化任务统一 Pi。不再需要 runtime 校验。
   const validateAutomationRuntimePolicy = (
-    input: Partial<CreateAutomationInput | UpdateAutomationInput>,
-    existing?: Automation,
+    _input: Partial<UpdateAutomationInput>,
+    _existing?: Automation,
   ): void => {
-    // 更新历史任务时，缺失的持久化 runtime 仍按 Claude 解释；仅新建任务使用 Pi 默认值。
-    const finalRuntime: AgentRuntime = input.agentRuntime ?? existing?.agentRuntime ?? (existing ? 'claude' : 'pi')
-    const finalChannelId = input.channelId !== undefined ? input.channelId : existing?.channelId
-    if (finalRuntime === 'claude' && finalChannelId) {
-      const agentChannelIds = getSettings().agentChannelIds ?? []
-      if (!agentChannelIds.includes(finalChannelId)) {
-        throw new Error('Claude Agent 内核只能使用已启用的 Agent 兼容渠道')
-      }
-    }
+    // no-op
   }
 
   const validateAutomationScheduleComplete = (
-    input: Partial<CreateAutomationInput | UpdateAutomationInput>,
+    input: Partial<UpdateAutomationInput>,
     existing?: Automation,
   ): void => {
     const scheduleType = input.scheduleType ?? existing?.scheduleType
     if (scheduleType === 'interval') {
       const intervalMinutes = input.intervalMinutes ?? existing?.intervalMinutes
       if (!isFiniteInt(intervalMinutes) || intervalMinutes < 1) throw new Error('scheduleType=interval 时 intervalMinutes 必填')
+    }
+    const activeWindowStart = input.activeWindowStart !== undefined
+      ? input.activeWindowStart ?? undefined
+      : existing?.activeWindowStart
+    const activeWindowEnd = input.activeWindowEnd !== undefined
+      ? input.activeWindowEnd ?? undefined
+      : existing?.activeWindowEnd
+    if ((activeWindowStart === undefined) !== (activeWindowEnd === undefined)) {
+      throw new Error('activeWindowStart 与 activeWindowEnd 必须同时设置或同时清除')
+    }
+    const activeWeekdays = input.activeWeekdays !== undefined
+      ? input.activeWeekdays ?? undefined
+      : existing?.activeWeekdays
+    if (activeWeekdays !== undefined && activeWeekdays.length === 0) {
+      // 空数组明确表示每天，不需要额外约束。
+    } else if (activeWeekdays !== undefined && scheduleType !== 'interval') {
+      throw new Error('周内运行日限制仅支持 scheduleType=interval')
+    }
+    if (activeWindowStart !== undefined && activeWindowEnd !== undefined) {
+      if (scheduleType !== 'interval') throw new Error('每日执行窗口仅支持 scheduleType=interval')
+      if (!validTimeOfDay(activeWindowStart) || !validTimeOfDay(activeWindowEnd) || activeWindowStart >= activeWindowEnd) {
+        throw new Error('每日执行窗口必须是同一天内有效的 HH:MM 范围，且开始早于结束')
+      }
     }
     if (scheduleType === 'daily' || scheduleType === 'weekly' || scheduleType === 'monthly') {
       const timeOfDay = input.timeOfDay ?? existing?.timeOfDay
@@ -6199,7 +6279,4 @@ export function registerIpcHandlers(): void {
       return getBranchWorktreeUsage(input.repoPath, input.branch)
     }
   )
-
-  // ===== 内嵌浏览器（synara 移植） =====
-  registerBrowserIpcHandlers()
 }

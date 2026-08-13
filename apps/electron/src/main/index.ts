@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, Menu, nativeTheme, protocol, screen, shell } from 'electron'
+import { IPC_CHANNELS } from '@myyoda/shared'
 import { join } from 'path'
 import { existsSync } from 'fs'
-import { IPC_CHANNELS } from '@myyoda/shared'
 
 // Dev 与正式版使用独立的 userData 目录，避免共享 Chromium SingletonLock 导致 dev 启动被静默退出
 // 必须在任何会读取 userData 路径的模块加载之前执行
@@ -43,31 +43,20 @@ function registerProtocolsAndHandlers(): void {
     app.commandLine.appendSwitch('disable-lcd-text')
   }
 
-  // macOS 文件关联：在 app ready 之前注册 open-file 事件
-  app.on('open-file', (event, filePath) => {
-    event.preventDefault()
-    handleMigrationFileOpen(filePath)
-  })
-
-  // Windows 文件关联：当用户双击文件时，新实例的参数会通过 second-instance 传给已有实例
+  // Windows 等平台通过 second-instance 唤起已有主窗口。
   app.on('second-instance', (_event, argv) => {
     if (hasOpenPlanningArgument(argv)) {
       showPlanningWindow()
       return
     }
     showAndFocusMainWindow()
-    const fileArg = argv.find((arg) => arg.endsWith('.myyoda-backup') || arg.endsWith('.myyoda-share'))
-    if (fileArg) {
-      handleMigrationFileOpen(fileArg)
-    }
   })
 }
 
 
 
-import { migrateDataDirIfNeeded } from './lib/migration-service'
 import { getSettings, updateSettings } from './lib/settings-service'
-import { handlePromaFileRequest } from './lib/local-file-protocol'
+import { handleMyYodaFileRequest } from './lib/local-file-protocol'
 
 // 处理 EPIPE 错误：当 stdout/stderr 管道被关闭时（如 electronmon 重启），忽略写入错误
 // 这在开发环境热重载时经常发生，不影响应用功能
@@ -100,6 +89,7 @@ import { seedBuiltinExperts } from './lib/expert-service'
 import { upgradeDefaultSkillsInWorkspaces } from './lib/agent-workspace-manager'
 import { stopAllAgents, killOrphanedClaudeSubprocesses, isAgentSessionActive, hasActiveAgentSessions } from './lib/agent-service'
 import { disposePiMcpConnections } from './lib/adapters/pi-mcp-tools'
+import { browserController } from './lib/browser-controller'
 import { markRunningDelegationsAsInterrupted, markStaleTaskSessionsIdle } from './lib/agent-session-manager'
 import { stopAllGenerations } from './lib/chat-service'
 import { configureUpdater, initAutoUpdater, cleanupUpdater } from './lib/updater/auto-updater'
@@ -124,8 +114,7 @@ import { dingtalkBridgeManager } from './lib/dingtalk-bridge-manager'
 import { getDingTalkMultiBotConfig } from './lib/dingtalk-config'
 import { wechatBridge } from './lib/wechat-bridge'
 import { getWeChatConfig } from './lib/wechat-config'
-import { createQuickTaskWindow, toggleQuickTaskWindow, destroyQuickTaskWindow } from './lib/quick-task-window'
-import { attachBrowserToWindow, disposeBrowserRuntime } from './lib/browser/browser-tools-injector'
+import { toggleQuickTaskWindow, destroyQuickTaskWindow } from './lib/quick-task-window'
 import { destroyPlanningWindow, showPlanningWindow } from './lib/planning-window'
 import { configurePlanningQuickEntries } from './lib/planning-quick-entry'
 import { hasOpenPlanningArgument } from './lib/planning-quick-entry-model'
@@ -141,19 +130,10 @@ import { registerGlobalShortcut, unregisterAllGlobalShortcuts } from './lib/glob
 import { setAppVersion } from '@myyoda/core'
 import { TRAY_IPC_CHANNELS } from '../types'
 
-const MIGRATION_IPC_OPEN = 'migration:open-import-file'
-
 function startCodeClawSurface(): void {
   // 不再启动时预创建桌宠窗口：CodeClaw 是可选企业桌面助手，默认关闭。
   // 开启后由 codeclaw-service 在推送可见状态时按需创建窗口。
   publishCodeClawNow()
-}
-
-/** 检查文件路径是否为迁移文件，如果是则通知渲染进程打开导入流程 */
-function handleMigrationFileOpen(filePath: string): void {
-  if (filePath.endsWith('.myyoda-backup') || filePath.endsWith('.myyoda-share')) {
-    sendToMainWindow(MIGRATION_IPC_OPEN, { filePath })
-  }
 }
 
 // ===== Bridge 注册（新增 Bridge 只需在此添加一个 registerBridge 调用） =====
@@ -486,15 +466,13 @@ function createWindow(): void {
   })
   setStoredMainWindow(mainWindow)
   registerTaskHandlers(mainWindow)
-  // 内嵌浏览器（synara 移植）：主窗口就绪后挂载 WebContentsView 生命周期。
-  attachBrowserToWindow(mainWindow)
   void rehydrateIncompleteTaskRuns()
     .then(() => healOrphanedTaskRuns())
     .catch((error: unknown) => {
       console.warn('[TaskRunner] 冷启动恢复失败:', error instanceof Error ? error.message : error)
     })
   installWindowsZoomInFallback(mainWindow)
-  installZoomFactorBroadcast(mainWindow)
+  browserController.setOwnerWindow(mainWindow)
 
   // Load the renderer
   const isDev = !app.isPackaged
@@ -613,6 +591,7 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     setStoredMainWindow(null)
+    browserController.dispose()
     mainWindow = null
   })
 }
@@ -643,8 +622,6 @@ app.whenReady().then(bootstrap).catch(handleBootstrapFailure)
  * 单点失败不应阻止窗口和托盘的创建（用户至少要能看到界面）。
  */
 async function bootstrap(): Promise<void> {
-  migrateDataDirIfNeeded()
-
   // 初始化 MyYoda 版本号（供 User-Agent 等全局标识使用）
   setAppVersion(app.getVersion())
 
@@ -653,7 +630,7 @@ async function bootstrap(): Promise<void> {
 
   // 注册自定义协议 myyoda-file:// 用于内联预览本地文件。
   // 协议只接受主进程签发的 opaque token，不解析 renderer 提供的绝对路径。
-  protocol.handle('myyoda-file', handlePromaFileRequest)
+  protocol.handle('myyoda-file', handleMyYodaFileRequest)
 
   // 初始化运行时环境（Shell 环境 + Bun + Git 检测）
   // 必须在其他初始化之前执行，确保环境变量正确加载
@@ -733,8 +710,8 @@ async function bootstrap(): Promise<void> {
     safeRun('initAutoUpdater', () => initAutoUpdater(mainWindow!))
   }
 
-  // 预创建快速任务窗口（隐藏状态，首次唤起秒开）
-  safeRun('createQuickTaskWindow', createQuickTaskWindow)
+  // 快速任务窗口改为懒创建：首次按全局快捷键（Alt+Space）唤起时才创建（toggleQuickTaskWindow 内部自带
+  // 幂等懒创建），避免启动时预创建导致“多窗口”困惑；按需创建的开销远小于多一个隐藏窗口的副作用。
   if (getSettings().voiceDictation?.enabled === true) {
     safeRun('createVoiceDictationWindow', createVoiceDictationWindow)
   }
@@ -859,9 +836,9 @@ app.on('before-quit', () => {
 
   // 中止所有活跃的 Agent 和 Chat 子进程
   stopAllAgents()
+  browserController.dispose()
   stopAllGenerations()
-  // 最后兜底：扫描并强杀所有孤儿 claude-agent-sdk 子进程（Issue #357）
-  // 针对 pidMap 未覆盖、dispose 漏杀等极端场景，确保不遗留残留进程
+  // 清理 Pi runtime 资源与残留子进程
   killOrphanedClaudeSubprocesses()
   // 清理更新器定时器
   cleanupUpdater()
@@ -885,8 +862,6 @@ app.on('before-quit', () => {
   // 销毁 CodeClaw 服务与窗口
   disposeCodeClawService()
   destroyCodeClawWindow()
-  // 销毁内嵌浏览器 runtime（WebContentsView）
-  disposeBrowserRuntime()
   // 关闭 Pi MCP 桥接连接（释放 stdio 子进程）
   disposePiMcpConnections().catch(() => {})
   // Clean up system tray before quitting

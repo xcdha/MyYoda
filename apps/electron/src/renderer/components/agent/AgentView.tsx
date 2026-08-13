@@ -71,7 +71,6 @@ import {
   agentChannelIdAtom,
   agentModelIdAtom,
   agentChannelIdsAtom,
-  agentRuntimeAtom,
   agentSessionChannelMapAtom,
   agentSessionModelMapAtom,
   currentAgentWorkspaceIdAtom,
@@ -119,7 +118,7 @@ import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { sendWithCmdEnterAtom } from '@/atoms/shortcut-atoms'
 import { useOpenPreview } from '@/components/diff/preview-opener'
 import type { AgentRuntime, AgentSendInput, AgentPendingFile, AgentThinkingLevel, FileDialogLargeFile, FileDialogResult, ModelOption, ReasoningCapability, SDKMessage, SDKUserMessage, ProviderType, AgentSessionFileRoots } from '@myyoda/shared'
-import { DEFAULT_AGENT_THINKING_LEVEL, getSessionThinkingLevel, inferAgentSdkContextWindow, inferContextWindow, inferReasoningTransport, isCodexFastModeSupportedModel, isOpenAIReasoningMaxSupportedModel, MAX_ATTACHMENT_SIZE, CLAUDE_RUNTIME_ENABLED, normalizeReasoningCapabilityLevel, normalizeReasoningLevel, resolveReasoningCapability, resolveReasoningProfile } from '@myyoda/shared'
+import { DEFAULT_AGENT_THINKING_LEVEL, getSessionThinkingLevel, inferAgentSdkContextWindow, inferContextWindow, inferReasoningTransport, isCodexFastModeSupportedModel, isOpenAIReasoningMaxSupportedModel, MAX_ATTACHMENT_SIZE, normalizeReasoningCapabilityLevel, normalizeReasoningLevel, resolveReasoningCapability, resolveReasoningProfile } from '@myyoda/shared'
 import { fileToBase64, formatFileNames, getFileParentPath } from '@/lib/file-utils'
 import { getFilePanelDragData, INSERT_FILE_MENTION_EVENT, type FilePanelDragItem } from '@/lib/file-panel-drag'
 import { buildQuotedSelectionBlock } from '@/lib/quoted-selection'
@@ -313,138 +312,6 @@ function AgentThinkingPopover({ config }: AgentThinkingPopoverProps): React.Reac
   )
 }
 
-interface AgentRuntimeOption {
-  value: AgentRuntime
-  label: string
-  description: string
-  badge?: string
-  badgeTone?: 'recommended' | 'deprecated'
-  notice?: string
-}
-
-// Pi 为默认与推荐内核，Claude Agent SDK 计划于 2026 年 8 月中旬彻底下线
-const AGENT_RUNTIME_OPTIONS: AgentRuntimeOption[] = [
-  ...(CLAUDE_RUNTIME_ENABLED ? [{
-    value: 'claude' as AgentRuntime,
-    label: 'Claude',
-    description: 'Claude Agent SDK',
-    badge: '即将下线',
-    badgeTone: 'deprecated' as const,
-    notice: '新功能已不再支持，将于 8 月中旬彻底下线，建议尽快切换到 Pi',
-  }] : []),
-  {
-    value: 'pi',
-    label: 'Pi',
-    description: 'Pi Agent SDK，MyYoda 默认内核，新功能仅在 Pi 上提供',
-    badge: '推荐',
-    badgeTone: 'recommended',
-  },
-]
-
-interface AgentRuntimeSelectorProps {
-  runtime: AgentRuntime
-  disabled?: boolean
-  onChange: (runtime: AgentRuntime) => void
-}
-
-function AgentRuntimeSelector({ runtime, disabled = false, onChange }: AgentRuntimeSelectorProps): React.ReactElement {
-  const [open, setOpen] = React.useState(false)
-  const current = AGENT_RUNTIME_OPTIONS.find((option) => option.value === runtime) ?? AGENT_RUNTIME_OPTIONS[0]!
-
-  const handleOpenChange = (nextOpen: boolean): void => {
-    if (disabled && nextOpen) return
-    setOpen(nextOpen)
-  }
-
-  const handleSelect = (nextRuntime: AgentRuntime): void => {
-    onChange(nextRuntime)
-    setOpen(false)
-  }
-
-  return (
-    <Popover open={open} onOpenChange={handleOpenChange}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <PopoverTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={disabled}
-              aria-label={`Agent 内核：${current.label}`}
-              className={cn(
-                'model-selector-trigger flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground',
-                disabled && 'cursor-not-allowed opacity-60 hover:bg-transparent hover:text-muted-foreground'
-              )}
-            >
-              <Box className="size-3.5" />
-              <span>{current.label}</span>
-              <ChevronDown className="size-3" />
-            </Button>
-          </PopoverTrigger>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="max-w-[240px]">
-          <p className="font-medium">{current.description}</p>
-          {current.notice && <p className="mt-0.5 text-xs text-amber-600 dark:text-amber-400">{current.notice}</p>}
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            {disabled ? 'Agent 运行中，完成后可切换' : '切换当前会话下一轮使用的内核'}
-          </p>
-        </TooltipContent>
-      </Tooltip>
-      <PopoverContent
-        side="top"
-        align="start"
-        sideOffset={8}
-        className="w-[248px] p-1.5"
-        onOpenAutoFocus={(e) => e.preventDefault()}
-      >
-        <div className="flex flex-col gap-1">
-          {AGENT_RUNTIME_OPTIONS.map((option) => {
-            const active = runtime === option.value
-            return (
-              <Button
-                key={option.value}
-                type="button"
-                variant="ghost"
-                aria-pressed={active}
-                className={cn(
-                  'h-auto justify-start rounded-md px-2.5 py-2 text-left',
-                  active && 'bg-accent text-accent-foreground'
-                )}
-                onClick={() => handleSelect(option.value)}
-              >
-                <div className="flex w-full items-center gap-2">
-                  <Box className="size-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-medium">{option.label}</span>
-                      {option.badge && (
-                        <span
-                          className={cn(
-                            'rounded-sm px-1 py-px text-[10px] font-medium leading-tight',
-                            option.badgeTone === 'deprecated'
-                              ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
-                              : 'bg-primary/10 text-primary'
-                          )}
-                        >
-                          {option.badge}
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-0.5 whitespace-normal text-[11px] font-normal text-muted-foreground">
-                      {option.description}
-                    </div>
-                  </div>
-                  {active && <Check className="size-3.5 shrink-0" />}
-                </div>
-              </Button>
-            )
-          })}
-        </div>
-      </PopoverContent>
-    </Popover>
-  )
-}
-
 export function AgentView({ sessionId }: { sessionId: string }): React.ReactElement {
   const [coworkOpen, setCoworkOpen] = React.useState(false)
   const { options: expertOptions } = useExpertOptions()
@@ -470,6 +337,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     prevStreamingRef.current = streaming
   }, [streaming, setQuotaRefreshVersion])
   const stoppedByUserSessions = useAtomValue(stoppedByUserSessionsAtom)
+  // 点击停止后，底层 Pi query 仍需一个很短的收尾窗口。该窗口内不可发起/排队新消息，
+  // 否则旧 run 与新 run 会交错，导致同一用户消息被重复展示或持久化。
+  const [isStopping, setIsStopping] = React.useState(false)
   const sendWithCmdEnter = useAtomValue(sendWithCmdEnterAtom)
   const longTextPasteAsAttachmentEnabled = useAtomValue(longTextPasteAsAttachmentEnabledAtom)
   const stoppedByUser = stoppedByUserSessions.has(sessionId)
@@ -492,10 +362,10 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   const sessionMetaChannelId = sessionMeta?.channelId
   const sessionMetaModelId = sessionMeta?.modelId
   const hasSessionMeta = Boolean(sessionMeta)
+  const isLegacyTranscript = sessionMeta?.legacyTranscript?.continuationRequired === true
   const agentChannelId = sessionMetaChannelId ?? sessionChannelMap.get(sessionId) ?? defaultChannelId
   const agentModelId = sessionMetaModelId ?? sessionModelMap.get(sessionId) ?? defaultModelId
   const agentChannelIds = useAtomValue(agentChannelIdsAtom)
-  const [agentRuntime, setAgentRuntime] = useAtom(agentRuntimeAtom)
   const setSettingsOpen = useSetAtom(settingsOpenAtom)
   const setDraftSessionIds = useSetAtom(draftSessionIdsAtom)
   const draftSessionIds = useAtomValue(draftSessionIdsAtom)
@@ -540,12 +410,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   // 已有会话首次打开时，从会话元数据初始化 per-session map。
   // setter 内的 `prev.has(sessionId)` 守卫保证幂等，外层不再订阅 Map atom，
   // 避免 setter 写入 → atom 引用变化 → effect 重跑的自循环（React #185）。
-  // Claude 内核默认关闭时，所有会话（含历史）一律使用 Pi。
-  const sessionAgentRuntime: AgentRuntime = !CLAUDE_RUNTIME_ENABLED
-    ? 'pi'
-    : hasSessionMeta
-      ? sessionMeta?.agentRuntime ?? 'claude'
-      : agentRuntime
+  // Claude runtime 已退役，所有会话（含历史）一律使用 Pi。
+  const sessionAgentRuntime: AgentRuntime = 'pi'
   // 只有会话元数据尚未加载时，才允许使用全局默认值初始化新会话。
   React.useEffect(() => {
     if (!sessionId) return
@@ -670,6 +536,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       return map
     })
   }, [sessionId, setDraftHtmlMap])
+
   const sessionPathMap = useAtomValue(agentSessionPathMapAtom)
   const setSessionPathMap = useSetAtom(agentSessionPathMapAtom)
   const sessionPath = sessionPathMap.get(sessionId) ?? null
@@ -712,6 +579,24 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     ? resolveReasoningProfile({ modelId: agentModelId ?? undefined, transport: inferReasoningTransport(agentChannelProvider) })
     : undefined
   const reasoningCapabilityKey = `${sessionAgentRuntime}:${agentChannelId ?? ''}:${agentModelId ?? ''}`
+  // 通用设置（默认思考深度 / 编码优化开关）：会话框显示值与实际生效链保持一致
+  const [appThinkingSettings, setAppThinkingSettings] = React.useState<{
+    optimizedCoding?: boolean
+    codingMode?: boolean
+    defaultThinkingLevel?: AgentThinkingLevel
+  } | null>(null)
+  React.useEffect(() => {
+    let cancelled = false
+    window.electronAPI.getSettings().then((s) => {
+      if (cancelled) return
+      setAppThinkingSettings({
+        optimizedCoding: s.optimizedCoding,
+        codingMode: s.codingMode,
+        defaultThinkingLevel: s.defaultThinkingLevel,
+      })
+    }).catch((error) => { console.warn('[AgentView] 读取应用设置失败:', error) })
+    return () => { cancelled = true }
+  }, [])
   const [piReasoningCapability, setPiReasoningCapability] = React.useState<{ key: string; capability: ReasoningCapability | undefined }>({ key: '', capability: undefined })
   React.useEffect(() => {
     if (!isSessionThinkingAvailable || !agentChannelId || !agentModelId) {
@@ -733,7 +618,10 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       .filter((item): item is (typeof UI_THINKING_LEVELS)[number] => item !== undefined)
     : (isOpenAIReasoningMaxSupportedModel(agentModelId ?? undefined) ? UI_THINKING_LEVELS : STANDARD_UI_THINKING_LEVELS)
   const persistedReasoningLevel = sessionMeta?.reasoningLevel ?? getSessionThinkingLevel(sessionMeta)
-  const rawSessionThinkingLevel: AgentThinkingLevel = persistedReasoningLevel ?? DEFAULT_AGENT_THINKING_LEVEL
+  // 无会话级设置时：跟随应用设置链（与 resolvePiThinkingLevel 一致：编码优化 → max，否则 defaultThinkingLevel）
+  const optimizedCodingOn = appThinkingSettings?.optimizedCoding ?? appThinkingSettings?.codingMode ?? false
+  const rawSessionThinkingLevel: AgentThinkingLevel = persistedReasoningLevel
+    ?? (optimizedCodingOn ? 'max' : (appThinkingSettings?.defaultThinkingLevel ?? DEFAULT_AGENT_THINKING_LEVEL))
   const sessionThinkingLevel = reasoningProfile
     ? normalizeReasoningLevel(reasoningProfile, rawSessionThinkingLevel) ?? 'high'
     : normalizeReasoningCapabilityLevel(effectiveReasoningCapability, rawSessionThinkingLevel) ?? rawSessionThinkingLevel
@@ -1015,7 +903,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         rawUserMessage: displayText,
         channelId,
         modelId: agentModelId || undefined,
-        agentRuntime: sessionAgentRuntime,
         workspaceId: currentWorkspaceId || undefined,
         startedAt: streamStartedAt,
         permissionModeOverride: permissionMode,
@@ -1291,7 +1178,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         rawUserMessage: snapshot.message,
         channelId: snapshot.channelId,
         modelId: snapshot.modelId,
-        agentRuntime: sessionAgentRuntime,
         workspaceId: snapshot.workspaceId,
         startedAt: streamStartedAt,
         permissionModeOverride: permissionMode,
@@ -1373,15 +1259,14 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       const sourcePath = f.sourcePath!
       const parentPath = getFileParentPath(sourcePath)
       try {
-        const read = await window.electronAPI.resolveAndReadFile(sourcePath, {
+        const data = await window.electronAPI.readBinaryBase64(sourcePath, {
           sessionId,
           candidateBasePaths: parentPath ? [parentPath] : undefined,
-        })
-        if (!read) {
+        }, MAX_ATTACHMENT_SIZE)
+        if (!data) {
           staleDraftFiles.push(f.filename)
           continue
         }
-        const data = await fileToBase64(new File([read.content], f.filename, { type: f.mediaType }))
         draftFilesToSave.push({ sourceFile: f, filename: f.filename, data })
       } catch (error) {
         console.error('[AgentView] 读取剪贴板草稿失败:', error)
@@ -1993,54 +1878,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     }
   }, [sessionId, streaming, backgroundWaiting, setSessionChannelMap, setSessionModelMap, setDefaultChannelId, setDefaultModelId, setAgentSessions])
 
-  const handleAgentRuntimeChange = React.useCallback(async (runtime: AgentRuntime): Promise<void> => {
-    if (runtime === sessionAgentRuntime) {
-      requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-input-mode="agent"] .ProseMirror')?.focus())
-      return
-    }
-    if (streaming || backgroundWaiting) {
-      toast.info('Agent 运行中，完成后再切换内核')
-      return
-    }
-
-    const previousDefaultRuntime = agentRuntime
-    const previousSessionMeta = sessionMeta
-    setAgentRuntime(runtime)
-    if (sessionMeta) {
-      setAgentSessions((prev) => prev.map((item) =>
-        item.id === sessionId
-          ? { ...item, agentRuntime: runtime, sdkSessionId: undefined, updatedAt: Date.now() }
-          : item
-      ))
-    }
-
-    try {
-      const updated = await window.electronAPI.updateSessionAgentRuntime(sessionId, runtime)
-      setAgentSessions((prev) => prev.map((item) => item.id === sessionId ? updated : item))
-      window.electronAPI.updateSettings({ agentRuntime: runtime }).catch((error) => {
-        console.error('[AgentView] 保存 Agent Runtime 默认值失败:', error)
-      })
-    } catch (error) {
-      console.error('[AgentView] 切换 Agent Runtime 失败:', error)
-      setAgentRuntime(previousDefaultRuntime)
-      if (previousSessionMeta) {
-        setAgentSessions((prev) => prev.map((item) => item.id === sessionId ? previousSessionMeta : item))
-      }
-      toast.error('Agent Runtime 切换失败', { description: getErrorMessage(error) })
-    } finally {
-      requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-input-mode="agent"] .ProseMirror')?.focus())
-    }
-  }, [
-    agentRuntime,
-    backgroundWaiting,
-    sessionAgentRuntime,
-    sessionId,
-    sessionMeta,
-    setAgentRuntime,
-    setAgentSessions,
-    streaming,
-  ])
-
   const handleCodexFastModeChange = React.useCallback(async (): Promise<void> => {
     if (!isCodexFastModeAvailable || streaming || backgroundWaiting || !sessionMeta) return
 
@@ -2135,12 +1972,20 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   }, [canPrepareDraftGitContext, draftGitContextSelection, sessionId, setAgentSessions])
 
   /** 发送消息 */
-  const handleSend = React.useCallback(async (overrideText?: string): Promise<void> => {
+  const handleSend = React.useCallback(async (overrideText?: string, fromEditor = false): Promise<void> => {
     const text = (overrideText ?? inputContent).trim()
     // 如果输入为空但有建议，使用建议内容
     const effectiveText = text || suggestion || ''
     const pendingFilesSnapshot = pendingFilesRef.current
     if (!messagesLoaded || (!effectiveText && pendingFilesSnapshot.length === 0) || !agentChannelId || !hasAvailableModel) return
+    if (isStopping) {
+      toast.info('正在停止上一轮 Agent', { description: '请等待停止完成后再发送消息。' })
+      return
+    }
+    if (isLegacyTranscript) {
+      toast.info('这是只读历史会话，请新建 Pi 会话继续')
+      return
+    }
     if (!streaming && messagesRefreshingRef.current) {
       toast.info('上一轮消息正在同步', {
         description: '请稍等片刻再发送；队列会在同步完成后继续。',
@@ -2173,7 +2018,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         id: 'agent-view-queued-message-hint',
         description: '如需立即处理，点击队列消息右侧的「立即发送」可打断当前执行（会终止正在运行的命令）。',
       })
-      if (overrideText === undefined) {
+      if (overrideText === undefined || fromEditor) {
         setInputContent('')
         setInputHtmlContent('')
       }
@@ -2202,7 +2047,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
             additionalDirectories: attachmentContext.additionalDirectories,
           }
         : undefined)
-      if (overrideText === undefined) {
+      if (overrideText === undefined || fromEditor) {
         setInputContent('')
         setInputHtmlContent('')
       }
@@ -2329,7 +2174,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       rawUserMessage: finalMessage,
       channelId: agentChannelId,
       modelId: agentModelId || undefined,
-      agentRuntime: sessionAgentRuntime,
       workspaceId: currentWorkspaceId || undefined,
       startedAt: streamStartedAt,
       permissionModeOverride: permissionMode,
@@ -2341,10 +2185,9 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       ...(mentions.mentionedCalendarEventIds.length > 0 && { mentionedCalendarEventIds: mentions.mentionedCalendarEventIds }),
     }
 
-    // 清空输入框（仅当发送的是用户自己输入的内容，而非推荐建议时）
-    // 用 === undefined 与上方 `overrideText ?? inputContent` 的取值语义保持一致，
-    // 避免未来出现 handleSend('') 时两条路径行为割裂
-    if (overrideText === undefined) {
+    // 清空输入框（仅当发送的是用户自己输入的内容，而非推荐建议时）。
+    // Enter 路径会显式传入已刷新的编辑器内容，因此也应清空。
+    if (overrideText === undefined || fromEditor) {
       setInputContent('')
       setInputHtmlContent('')
     }
@@ -2359,30 +2202,29 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         return map
       })
     })
-  }, [inputContent, createBaseAdditionalDirectories, preparePendingFilesForSend, prepareDraftGitContextForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, sessionAgentRuntime, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage])
+  }, [inputContent, createBaseAdditionalDirectories, preparePendingFilesForSend, prepareDraftGitContextForSend, restoreQueuedAttachmentsToPending, sessionId, agentChannelId, agentModelId, sessionAgentRuntime, agentChannelProvider, currentWorkspaceId, streaming, backgroundWaiting, suggestion, hasAvailableModel, store, consumeQuotedSelection, setStreamingStates, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, permissionMode, messagesLoaded, setQueuedMessages, setQuotedSelectionMap, sendPlainTextAgentMessage, isLegacyTranscript, isStopping])
 
   /** 停止生成 */
   const handleStop = React.useCallback((): void => {
+    if (isStopping) return
+    setIsStopping(true)
     store.set(stoppedByUserSessionsAtom, (prev: Set<string>) => {
       const next = new Set(prev)
       next.add(sessionId)
       return next
     })
 
-    setStreamingStates((prev) => {
-      const current = prev.get(sessionId)
-      if (!current || !current.running) return prev
-      const map = new Map(prev)
-      map.set(sessionId, {
-        ...current,
-        running: false,
-        ...finalizeStreamingActivities(current.toolActivities),
-      })
-      return map
+    // 保持 running 到 STREAM_COMPLETE 到达。提前把它切成 false 会让输入框误以为
+    // 已经可以开启新 run，而底层 query 尚未退出，形成重复保存的竞态。
+    window.electronAPI.stopAgent(sessionId).catch((error) => {
+      console.error(error)
+      setIsStopping(false)
     })
+  }, [isStopping, sessionId, store])
 
-    window.electronAPI.stopAgent(sessionId).catch(console.error)
-  }, [sessionId, setStreamingStates, store])
+  React.useEffect(() => {
+    if (!streaming) setIsStopping(false)
+  }, [streaming])
 
   /** 手动发送 /compact 命令 */
   const handleCompact = React.useCallback((): void => {
@@ -2435,7 +2277,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       userMessage: '/compact',
       channelId: agentChannelId,
       modelId: agentModelId || undefined,
-      agentRuntime: sessionAgentRuntime,
       workspaceId: currentWorkspaceId || undefined,
       startedAt: streamStartedAt,
       permissionModeOverride: permissionMode,
@@ -2527,7 +2368,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
       rawUserMessage: lastUserRawMessage,
       channelId: agentChannelId,
       modelId: agentModelId || undefined,
-      agentRuntime: sessionAgentRuntime,
       workspaceId: currentWorkspaceId || undefined,
       startedAt: streamStartedAt,
       permissionModeOverride: permissionMode,
@@ -2570,7 +2410,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
         userMessage: prompt,
         channelId: agentChannelId,
         modelId: agentModelId || undefined,
-        agentRuntime: sessionAgentRuntime,
         workspaceId: currentWorkspaceId || undefined,
         mentionedSessionIds: [sessionId],
         startedAt: streamStartedAt,
@@ -2706,7 +2545,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
     (allAskUserRequests.get(sessionId)?.length ?? 0) > 0 ||
     (allExitPlanRequests.get(sessionId)?.length ?? 0) > 0
   const hasBlockingRequests = hasBannerOverlay || (allPermissionRequests.get(sessionId)?.length ?? 0) > 0
-  const canSendQueuedNow = messagesLoaded && (streaming || !messagesRefreshing) && !!agentChannelId && hasAvailableModel && !hasBlockingRequests
+  const canSendQueuedNow = messagesLoaded && (streaming || !messagesRefreshing) && !!agentChannelId && hasAvailableModel && !hasBlockingRequests && !isStopping
   const autoSendingQueuedRef = React.useRef(false)
   const queuedSendInFlightRef = React.useRef(false)
   const sendingQueuedMessageIdsRef = React.useRef<Set<string>>(new Set())
@@ -2823,7 +2662,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
   }, [togglePreviewPanel])
 
   const hasTextInput = inputContent.trim().length > 0
-  const canSend = messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput)
+  const canSend = !isStopping && messagesLoaded && (streaming || !messagesRefreshing) && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput)
 
   const inputToolbarItems = React.useMemo<ToolbarItem[]>(() => [
     {
@@ -2962,6 +2801,7 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           size="icon"
           className={inputToolbarDangerButtonClass}
           onClick={handleStop}
+          disabled={isStopping}
         >
           <Square className="size-[16px]" fill="currentColor" strokeWidth={0} />
         </Button>
@@ -3005,13 +2845,6 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           showChannelInTrigger
           useSharedOpenState
         />
-        {AGENT_RUNTIME_OPTIONS.length > 1 && (
-          <AgentRuntimeSelector
-            runtime={sessionAgentRuntime}
-            disabled={streaming || backgroundWaiting}
-            onChange={handleAgentRuntimeChange}
-          />
-        )}
       </div>
       {sendControl}
     </>
@@ -3058,8 +2891,8 @@ export function AgentView({ sessionId }: { sessionId: string }): React.ReactElem
           stoppedByUser={stoppedByUser}
           onRetry={handleRetry}
           onRetryInNewSession={handleRetryInNewSession}
-          onFork={handleFork}
-          onRewind={handleRewindRequest}
+          onFork={isLegacyTranscript ? undefined : handleFork}
+          onRewind={isLegacyTranscript ? undefined : handleRewindRequest}
           onCompact={handleCompact}
         />
 

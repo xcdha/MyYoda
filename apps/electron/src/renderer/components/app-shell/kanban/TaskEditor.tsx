@@ -257,6 +257,7 @@ export function TaskEditor({
   }, [])
 
   const consumeGeneratedEvent = React.useCallback((event: TaskGeneratedEventPayload): void => {
+    try {
     const action = resolveGeneratedTaskEvent(event, workspaceId, pendingGenerationRef.current)
     if (action.kind === 'ignore') return
     finishGeneration()
@@ -269,7 +270,7 @@ export function TaskEditor({
     const nextDraft = taskSpecToEditorDraft(action.spec, target, defaultModel)
     setDraft((current) => ({
       ...(target.mode === 'create' ? { ...nextDraft, fixedId: action.slug } : nextDraft),
-      // Generator prompt 只负责拆 DAG；工作区、默认模型/权限来自用户在表单里的显式选择。
+      // Generator prompt 只负责拆 DAG；项目、默认模型/权限来自用户在表单里的显式选择。
       projectId: nextDraft.projectId || current.projectId,
       boundProjectId: nextDraft.boundProjectId ?? current.boundProjectId,
       cwd: nextDraft.cwd ?? current.cwd,
@@ -280,6 +281,10 @@ export function TaskEditor({
       teamId: action.spec.defaults?.teamId ?? current.teamId,
     }))
     setMode('manual')
+    } catch (err) {
+      console.error('[TaskEditor] consumeGeneratedEvent error:', err)
+      toast.error('生成任务失败', { description: err instanceof Error ? err.message : String(err) })
+    }
   }, [defaultModel, finishGeneration, target, workspaceId])
 
   React.useEffect(() => window.electronAPI.tasks.onGenerated((event) => {
@@ -292,10 +297,13 @@ export function TaskEditor({
     consumeGeneratedEvent(event)
   }), [consumeGeneratedEvent, workspaceId])
 
+  // 卸载时只清理已完成生成的草稿 session，不删除仍在生成中的 session。
+  // 生成中的 session 由 generateTaskForSession 的超时/完成逻辑自行清理。
   React.useEffect(() => () => {
     if (generationTimerRef.current) clearTimeout(generationTimerRef.current)
-    const drafts = new Set([generatedDraftRef.current, pendingGenerationRef.current].filter((id): id is string => Boolean(id)))
-    for (const draftId of drafts) void window.electronAPI.deleteAgentSession(draftId).catch(() => undefined)
+    if (generatedDraftRef.current) {
+      void window.electronAPI.deleteAgentSession(generatedDraftRef.current).catch(() => undefined)
+    }
   }, [])
 
   const addSubtask = (): void => {
@@ -363,6 +371,7 @@ export function TaskEditor({
         toast.error('生成任务超时，请稍后重试')
       }, GENERATE_TIMEOUT_MS)
     } catch (cause) {
+      console.error('[TaskEditor] generate failed:', cause)
       finishGeneration()
       toast.error('生成任务失败', { description: cause instanceof Error ? cause.message : String(cause) })
     }
@@ -460,7 +469,7 @@ export function TaskEditor({
         <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(320px,0.9fr)_minmax(420px,1.4fr)]">
           <section className="space-y-4 overflow-y-auto rounded-2xl bg-card p-4 shadow-sm">
             <div className="space-y-3">
-              <div><h2 className="font-semibold">任务定义</h2><p className="text-xs text-muted-foreground">描述目标，并选择工作区与执行策略。</p></div>
+              <div><h2 className="font-semibold">任务定义</h2><p className="text-xs text-muted-foreground">描述目标，并选择项目与执行策略。</p></div>
               <div className="inline-flex w-fit rounded-lg bg-muted/70 p-1">
                 {(['manual', 'generate'] as TaskEditorMode[]).map((value) => (
                   <button
@@ -484,19 +493,18 @@ export function TaskEditor({
             <label className="block space-y-1.5 text-xs font-medium">验收标准<Textarea value={draft.acceptanceCriteria ?? ''} onChange={(event) => patchDraft({ acceptanceCriteria: event.target.value })} placeholder="可选：如何判断任务完成" rows={3} /></label>
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="space-y-1.5 text-xs font-medium">
-                工作区
+                项目
                 <select
                   value={draft.projectId}
-                  disabled={Boolean(initialProjectId)}
                   onChange={(event) => patchDraft({ projectId: event.target.value })}
-                  className="h-9 w-full rounded-md border border-border/60 bg-background px-2 text-sm disabled:opacity-70"
+                  className="h-9 w-full rounded-md border border-border/60 bg-background px-2 text-sm"
                 >
-                  <option value="">不绑定工作区（Workspace Task）</option>
+                  <option value="">不绑定项目（工作区级任务）</option>
                   {projects.map((project) => (
                     <option key={project.id} value={project.id}>{project.name}</option>
                   ))}
                 </select>
-                <span className="block text-[11px] font-normal leading-4 text-muted-foreground">绑定后使用工作区目录作为任务工作目录</span>
+                <span className="block text-[11px] font-normal leading-4 text-muted-foreground">绑定后优先使用项目工作目录；不绑定时回退到工作区默认目录</span>
               </label>
               <label className="space-y-1.5 text-xs font-medium">权限<select value={draft.permissionMode ?? 'allow-all'} onChange={(event) => patchDraft({ permissionMode: event.target.value as 'safe' | 'ask' | 'allow-all' })} className="h-9 w-full rounded-md border border-border/60 bg-background px-2 text-sm"><option value="allow-all">自动执行</option><option value="ask">需要确认</option><option value="safe">安全模式</option></select></label>
               <div className="space-y-1.5 text-xs font-medium">

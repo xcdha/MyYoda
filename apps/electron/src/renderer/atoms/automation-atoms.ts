@@ -32,6 +32,10 @@ export interface AutomationDraft {
   prompt: string
   scheduleType: AutomationScheduleType
   intervalMinutes: number
+  /** interval 的每日有效运行窗口；留空表示全天 */
+  activeWindowStart?: string
+  activeWindowEnd?: string
+  activeWeekdays?: number[]
   timeOfDay?: string
   dayOfWeek?: number
   dayOfMonth?: number
@@ -39,7 +43,6 @@ export interface AutomationDraft {
   scheduledAt?: number
   /** 最大运行次数上限（实际执行次数）；undefined = 不限次 */
   maxRuns?: number
-  agentRuntime: AgentRuntime
   channelId: string
   modelId?: string
   workspaceId?: string
@@ -75,7 +78,6 @@ export function createEmptyDraft(): AutomationDraft {
     timeOfDay: '09:00',
     dayOfWeek: 1,
     dayOfMonth: 1,
-    agentRuntime: 'pi',
     channelId: '',
     executionMode: AUTOMATION_DEFAULT_EXECUTION_MODE,
     permissionMode: AUTOMATION_DEFAULT_PERMISSION_MODE,
@@ -95,12 +97,14 @@ export function automationToDraft(a: Automation): AutomationDraft {
     prompt: a.prompt,
     scheduleType: a.scheduleType,
     intervalMinutes: a.intervalMinutes,
+    activeWindowStart: a.activeWindowStart,
+    activeWindowEnd: a.activeWindowEnd,
+    activeWeekdays: a.activeWeekdays,
     timeOfDay: a.timeOfDay,
     dayOfWeek: a.dayOfWeek,
     dayOfMonth: a.dayOfMonth,
     scheduledAt: a.scheduledAt,
     maxRuns: a.maxRuns,
-    agentRuntime: a.agentRuntime ?? 'pi',
     channelId: a.channelId,
     modelId: a.modelId,
     workspaceId: a.workspaceId,

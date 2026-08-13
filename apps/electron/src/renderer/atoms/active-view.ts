@@ -9,7 +9,6 @@
  * - repo-wiki: Project 模式 Yoda 知识库（LLM 知识库）入口
  * - projects: 遗留值（项目中心已移除；运行时回退到 conversations）
  * - excalidraw-gallery / excalidraw-editor: 手绘白板视图
- * - browser: 内嵌浏览器面板（Agent 浏览器，synara 移植）
  */
 
 import { atom } from 'jotai'

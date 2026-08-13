@@ -107,7 +107,7 @@ export function sessionThinkingLevelPatch(
   return { reasoningLevel: level, thinkingLevel: level, openAIThinkingLevel: level }
 }
 
-/** 是否为 Proma 可暴露 reasoning.effort 的 OpenAI 推理模型。 */
+/** 是否为 MyYoda 可暴露 reasoning.effort 的 OpenAI 推理模型。 */
 export function isOpenAIReasoningSupportedModel(modelId: string | undefined): boolean {
   const normalized = modelId?.toLowerCase() ?? ''
   // Pi catalog 中 gpt-5*-chat-latest 是非 reasoning 的对话变体；它们不能接受
@@ -290,6 +290,26 @@ export interface SDKUserMessage {
   isReplay?: boolean
   /** SDK 合成的消息（如 Skill 展开 prompt），非人类用户输入 */
   isSynthetic?: boolean
+  /** Skills successfully loaded for this specific user input. */
+  skill_activations?: SkillActivation[]
+}
+
+/** Skill successfully loaded during an Agent turn. */
+export type SkillActivationSource = 'explicit' | 'read'
+
+export interface SkillActivation {
+  /** Skill directory slug, stable across display-name changes. */
+  slug: string
+  /** Frontmatter name when available; otherwise the slug. */
+  name: string
+  /** `SKILL.md` path used to load the Skill; retained as a compatibility fallback. */
+  filePath?: string
+  /** Stable MyYoda workspace locator for a managed Skill. */
+  workspaceSlug?: string
+  /** Path relative to the managed workspace Skills directory, such as `my-skill/SKILL.md`. */
+  workspaceSkillPath?: string
+  /** Ways this turn loaded the Skill. */
+  sources: SkillActivationSource[]
 }
 
 /** SDK result 消息（查询结束时返回） */
@@ -311,6 +331,8 @@ export interface SDKResultMessage {
   background_tasks?: SDKBackgroundTaskSummary[]
   session_crons?: SDKSessionCronSummary[]
   session_id?: string
+  /** Skills successfully loaded during this result's turn. */
+  skill_activations?: SkillActivation[]
   /** 渠道配置的模型 ID，用于缺失 modelUsage.contextWindow 时按 Agent SDK 运行窗口兜底 */
   _channelModelId?: string
   /** 渠道 provider，用于按 Agent SDK 实际运行窗口计算压缩阈值 */
@@ -750,6 +772,35 @@ export type SessionKanbanCommand =
 // ===== Agent 会话管理 =====
 
 /**
+ * Agent 执行时使用的文件根。
+ *
+ * 未持久化该字段的历史会话必须按 session 解释，避免升级后将历史 SDK 相对路径
+ * 错误应用到新的共享项目根。
+ */
+export type AgentCwdMode = 'session' | 'project'
+
+/** 会话私有工作台的文件布局。缺失字段兼容旧版 `.context/` 子目录。 */
+export type SessionWorkbenchLayout = 'legacy-context' | 'root'
+
+/** 经主进程校验后持久化的 Agent 会话活动 worktree。 */
+export interface AgentActiveWorktree {
+  /** linked worktree 的绝对路径 */
+  path: string
+  /** worktree 所属主仓库根目录 */
+  mainRepoRoot: string
+  /** 选择时 Git 报告的分支名 */
+  branch: string
+  /** 用户明确选择的时间戳 */
+  selectedAt: number
+}
+
+/** 更新 Agent 会话活动 worktree 的输入；null 表示回到默认 cwd。 */
+export interface SetAgentSessionActiveWorktreeInput {
+  sessionId: string
+  worktreePath: string | null
+}
+
+/**
  * Agent 会话轻量索引项
  *
  * 存储在 ~/.myyoda/agent-sessions.json 中，
@@ -770,10 +821,13 @@ export interface AgentSessionMeta {
   sdkSessionId?: string
   /** Pi session JSONL 的精确路径；避免仅按 session ID 子串定位 artifact。 */
   piSessionFile?: string
-  /** Proma assistant UI UUID 到 Pi 树状 session entry ID 的持久映射。 */
+  /** MyYoda assistant UI UUID 到 Pi 树状 session entry ID 的持久映射。 */
   piEntryBindings?: Record<string, string>
-  /** 当前会话使用的 Agent runtime；历史会话缺省为 claude */
-  agentRuntime?: import('./agent-provider').AgentRuntime
+  /** 已退役 Claude runtime 的只读 transcript；必须新建 Pi 会话才能继续。 */
+  legacyTranscript?: {
+    sourceRuntime: 'claude'
+    continuationRequired: true
+  }
   /** ChatGPT Codex Fast Mode 开关；仅 Pi + ChatGPT OAuth 的受支持模型实际生效。 */
   codexFastMode?: boolean
   /**
@@ -789,6 +843,21 @@ export interface AgentSessionMeta {
   openAIThinkingLevel?: AgentThinkingLevel
   /** 所属工作区 ID */
   workspaceId?: string
+  /**
+   * Agent 执行 cwd 的持久化语义。新会话使用 project；缺失字段兼容升级前的
+   * session workbench cwd。
+   */
+  agentCwdMode?: AgentCwdMode
+  /**
+   * 当前会话显式激活的 linked worktree。缺失时保持 agentCwdMode 定义的默认 cwd；
+   * worktree 失效时主进程会主动清除，不会猜测切换到其它分支。
+   */
+  activeWorktree?: AgentActiveWorktree
+  /**
+   * 会话私有工作台的文件布局。新会话在 workbench 根目录直接存放计划、handoff
+   * 等私有资料；缺失字段的历史会话保留 `.context/` 路径以兼容工具历史。
+   */
+  sessionWorkbenchLayout?: SessionWorkbenchLayout
   /** 是否置顶 */
   pinned?: boolean
   /** 是否已星标（仅用于侧栏快速识别，不影响排序或置顶） */
@@ -799,7 +868,7 @@ export interface AgentSessionMeta {
   attachedDirectories?: string[]
   /** 附加的外部文件路径列表（绝对路径，发送时以父目录作为 SDK additionalDirectories） */
   attachedFiles?: string[]
-  /** 分叉来源：源会话的 MyYoda 工作目录（SDK session 文件在此目录的项目空间中，首次 resume 后清除） */
+  /** 分叉来源：源会话的 MyYoda 会话沙箱目录（SDK session state 位于此处，首次 resume 后清除；不是 Craft Project cwd） */
   forkSourceDir?: string
   /** 分叉来源：源会话的 SDK session ID（用于 rewind 时读取源会话的 file-history-snapshot 和备份文件） */
   forkSourceSdkSessionId?: string
@@ -838,13 +907,6 @@ export interface AgentSessionMeta {
   delegationGoal?: string
   /** 绑定的项目 ID（project.config.id），看板过滤用 */
   projectId?: string
-  /**
-   * Agent 执行 cwd 的持久化语义：'project' 表示优先使用 projectId 绑定 Project 的
-   * workingDirectory（若可用）；'session' 表示固定使用会话隔离沙箱目录。
-   * 新会话创建时写入 'project'；历史会话缺失该字段按 'session' 解释，避免升级后
-   * 把旧会话已经在沙箱里产生的状态错误切换到共享项目目录。
-   */
-  agentCwdMode?: 'session' | 'project'
   /** 用户自建分组 ID（SessionGroup.id），与 projectId 独立，用于侧边栏「分组方式：自定义分组」 */
   customGroupId?: string
   /** 项目继承的工作目录绝对路径（Conductor / additionalDirectories）；Git Worktree 模式下为 worktree 路径 */
@@ -1406,8 +1468,6 @@ export interface AgentSendInput {
   channelId: string
   /** 模型 ID */
   modelId?: string
-  /** 本轮请求使用的 Agent runtime（用于输入区快速切换后的兜底同步） */
-  agentRuntime?: import('./agent-provider').AgentRuntime
   /** 工作区 ID（用于确定 cwd） */
   workspaceId?: string
   /** 附加的外部目录（绝对路径，传递给 SDK additionalDirectories） */
@@ -1930,6 +1990,8 @@ export const AGENT_IPC_CHANNELS = {
   UPDATE_TITLE: 'agent:update-title',
   /** 更新会话模型选择 */
   UPDATE_SESSION_MODEL: 'agent:update-session-model',
+  /** 选择或清除当前会话的活动 worktree */
+  SET_ACTIVE_WORKTREE: 'agent:set-active-worktree',
   /** 删除会话 */
   DELETE_SESSION: 'agent:delete-session',
   /** 迁移 Chat 对话记录到 Agent 会话 */
@@ -1978,6 +2040,21 @@ export const AGENT_IPC_CHANNELS = {
   SPAWN_EXPERT_COWORK: 'agent:spawn-expert-cowork',
   /** 查询当前会话的 cowork 子会话列表 */
   LIST_COWORK_SESSIONS: 'agent:list-cowork-sessions',
+
+  // Pi 受管浏览器（网页内容与 CDP 仅驻留主进程）
+  OPEN_BROWSER: 'agent:open-browser',
+  LIST_BROWSER_TABS: 'agent:list-browser-tabs',
+  CREATE_BROWSER_TAB: 'agent:create-browser-tab',
+  SELECT_BROWSER_TAB: 'agent:select-browser-tab',
+  CLOSE_BROWSER_TAB: 'agent:close-browser-tab',
+  GET_BROWSER_STATE: 'agent:get-browser-state',
+  SET_BROWSER_LAYOUT: 'agent:set-browser-layout',
+  NAVIGATE_BROWSER: 'agent:navigate-browser',
+  GO_BACK_BROWSER: 'agent:go-back-browser',
+  GO_FORWARD_BROWSER: 'agent:go-forward-browser',
+  RELOAD_BROWSER: 'agent:reload-browser',
+  CLOSE_BROWSER: 'agent:close-browser',
+  BROWSER_STATE_CHANGED: 'agent:browser-state-changed',
 
   // 后台任务管理
   /** 获取任务输出 */

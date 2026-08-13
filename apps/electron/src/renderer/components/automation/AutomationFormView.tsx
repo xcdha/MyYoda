@@ -3,7 +3,7 @@
  *
  * 两栏布局：
  * - 左：大的自然语言任务描述输入框（主角）
- * - 右：配置栏（启用 / 状态信息 / 调度模式 / 模型 / 空间 / 运行历史）
+ * - 右：配置栏（启用 / 状态信息 / 调度模式 / 模型 / 工作区 / 运行历史）
  *
  * 表单打开时 AppShell 会隐藏右侧文件面板，中间区域扩展到全宽。
  */
@@ -34,7 +34,7 @@ import {
   automationToDraft,
   type AutomationDraft,
 } from '@/atoms/automation-atoms'
-import { agentWorkspacesAtom, agentSessionsAtom, agentChannelIdsAtom, agentRuntimeAtom, currentAgentWorkspaceIdAtom } from '@/atoms/agent-atoms'
+import { agentWorkspacesAtom, agentSessionsAtom, currentAgentWorkspaceIdAtom } from '@/atoms/agent-atoms'
 import { serverKanbanProjectsAtom } from '@/atoms/project-atoms'
 import { filterPickableKanbanProjects } from '@/components/app-shell/kanban/types'
 import { planningWorkspaceScopeAtom } from '@/atoms/planning-atoms'
@@ -52,7 +52,6 @@ import type {
   UpdateAutomationInput,
   AgentRuntime,
 } from '@myyoda/shared'
-import { CLAUDE_RUNTIME_ENABLED } from '@myyoda/shared'
 
 const NO_FEISHU_BINDING = '__none__'
 // Radix Select 不允许 SelectItem 的 value 为空字符串（会在渲染时直接 throw），
@@ -92,6 +91,21 @@ function datetimeLocalToTs(value: string): number | undefined {
   return Number.isFinite(ts) ? ts : undefined
 }
 
+function getWeekdayPreset(days?: number[]): 'everyday' | 'weekdays' | 'weekends' | 'custom' {
+  const normalized = [...new Set(days ?? [])].sort((a, b) => a - b)
+  if (normalized.length === 0) return 'everyday'
+  if (normalized.join(',') === '1,2,3,4,5') return 'weekdays'
+  if (normalized.join(',') === '0,6') return 'weekends'
+  return 'custom'
+}
+
+function getWeekdaysFromPreset(value: string, current?: number[]): number[] {
+  if (value === 'weekdays') return [1, 2, 3, 4, 5]
+  if (value === 'weekends') return [0, 6]
+  if (value === 'custom') return current && current.length > 0 ? current : [1]
+  return []
+}
+
 function formatRunStatus(status: AutomationRun['status']): string {
   if (status === 'success') return '完成'
   if (status === 'error') return '失败'
@@ -103,7 +117,7 @@ function canPersistDraft(draft: AutomationDraft): boolean {
   return !!(draft.name.trim() && draft.prompt.trim())
 }
 
-/** 任务是否具备运行 / 启用所需的最小完整度（模型 + 空间） */
+/** 任务是否具备运行 / 启用所需的最小完整度（模型 + 工作区） */
 function isReadyToRun(draft: AutomationDraft): boolean {
   return canPersistDraft(draft) && !!draft.channelId && !!draft.workspaceId
 }
@@ -114,7 +128,7 @@ function listMissingFields(draft: AutomationDraft): string[] {
   if (!draft.name.trim()) missing.push('任务名称')
   if (!draft.prompt.trim()) missing.push('任务描述')
   if (!draft.channelId) missing.push('模型')
-  if (!draft.workspaceId) missing.push('空间')
+  if (!draft.workspaceId) missing.push('工作区')
   return missing
 }
 
@@ -125,12 +139,14 @@ function getDraftSignature(draft: AutomationDraft): string {
     prompt: draft.prompt.trim(),
     scheduleType: draft.scheduleType,
     intervalMinutes: draft.intervalMinutes,
+    activeWindowStart: draft.activeWindowStart ?? '',
+    activeWindowEnd: draft.activeWindowEnd ?? '',
+    activeWeekdays: draft.activeWeekdays ?? [],
     timeOfDay: draft.timeOfDay ?? '',
     dayOfWeek: draft.dayOfWeek ?? '',
     dayOfMonth: draft.dayOfMonth ?? '',
     scheduledAt: draft.scheduledAt ?? '',
     maxRuns: draft.maxRuns ?? '',
-    agentRuntime: draft.agentRuntime,
     channelId: draft.channelId,
     modelId: draft.modelId ?? '',
     workspaceId: draft.workspaceId ?? '',
@@ -149,12 +165,14 @@ function draftToCreateInput(draft: AutomationDraft): CreateAutomationInput {
     prompt: draft.prompt.trim(),
     scheduleType: draft.scheduleType,
     intervalMinutes: draft.intervalMinutes,
+    activeWindowStart: draft.activeWindowStart,
+    activeWindowEnd: draft.activeWindowEnd,
+    activeWeekdays: draft.activeWeekdays,
     timeOfDay: draft.timeOfDay,
     dayOfWeek: draft.dayOfWeek,
     dayOfMonth: draft.dayOfMonth,
     scheduledAt: draft.scheduledAt,
     maxRuns: draft.maxRuns,
-    agentRuntime: draft.agentRuntime,
     channelId: draft.channelId,
     modelId: draft.modelId,
     workspaceId: draft.workspaceId,
@@ -175,12 +193,14 @@ function draftToUpdateInput(draft: AutomationDraft): UpdateAutomationInput {
     prompt: draft.prompt.trim(),
     scheduleType: draft.scheduleType,
     intervalMinutes: draft.intervalMinutes,
+    activeWindowStart: draft.activeWindowStart ?? null,
+    activeWindowEnd: draft.activeWindowEnd ?? null,
+    activeWeekdays: draft.activeWeekdays ?? null,
     timeOfDay: draft.timeOfDay,
     dayOfWeek: draft.dayOfWeek,
     dayOfMonth: draft.dayOfMonth,
     scheduledAt: draft.scheduledAt,
     maxRuns: draft.maxRuns,
-    agentRuntime: draft.agentRuntime,
     channelId: draft.channelId,
     modelId: draft.modelId,
     workspaceId: draft.workspaceId ?? '',
@@ -218,22 +238,6 @@ function createFeishuTarget(binding: FeishuChatBinding): AutomationFeishuNotific
   }
 }
 
-function coerceAutomationDraftRuntime(
-  draft: AutomationDraft,
-  defaultAgentRuntime: AgentRuntime,
-  agentChannelIds: string[],
-): AutomationDraft {
-  const runtime: AgentRuntime = draft.id
-    ? draft.agentRuntime ?? defaultAgentRuntime
-    : defaultAgentRuntime
-
-  if (runtime === 'claude' && draft.channelId && !agentChannelIds.includes(draft.channelId)) {
-    return { ...draft, agentRuntime: runtime, channelId: '', modelId: undefined, active: false }
-  }
-
-  return draft.agentRuntime === runtime ? draft : { ...draft, agentRuntime: runtime }
-}
-
 function AutomationPromptEmptyGuide(): React.ReactElement {
   return (
     <div className="rounded-xl bg-foreground/[0.035] p-4 shadow-inner">
@@ -241,14 +245,14 @@ function AutomationPromptEmptyGuide(): React.ReactElement {
         <div>
           <div className="text-[13px] font-semibold text-foreground">推荐：让 MyYoda Agent 创建</div>
           <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            在左侧会话里说清目标，并明确表示要求创建定时任务，MyYoda Agent 会生成任务描述，并补全周期、空间和模型等配置，手动编辑更适合微调任务描述。
+            在左侧会话里说清目标，并明确表示要求创建定时任务，MyYoda Agent 会生成任务描述，并补全周期、工作区和模型等配置，手动编辑更适合微调任务描述。
           </div>
         </div>
         <div className="h-px bg-border/50" />
         <div>
           <div className="text-[13px] font-medium text-foreground/85">手动编写时，只写任务本身</div>
           <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            例：检查 MyYoda 仓库新增 issue，主动回复问答类问题，不清楚的部分整理到空间目录下的 .context/issue-faq.md 文档；真正的 Bug 或请求罗列后发给我，不要记录任何重复的信息。
+            例：检查 MyYoda 仓库新增 issue，主动回复问答类问题，不清楚的部分整理到工作区目录下的 .context/issue-faq.md 文档；真正的 Bug 或请求罗列后发给我，不要记录任何重复的信息。
           </div>
         </div>
       </div>
@@ -306,103 +310,6 @@ function SaveStatusBadge({
 }
 
 // Pi 为默认与推荐内核，Claude Agent SDK 计划于 2026 年 8 月中旬彻底下线
-const AGENT_RUNTIME_OPTIONS: Array<{
-  value: AgentRuntime
-  label: string
-  description: string
-  badge?: string
-  badgeTone?: 'recommended' | 'deprecated'
-}> = [
-  {
-    value: 'claude',
-    label: 'Claude',
-    description: 'Claude Agent SDK；模型仅限已标记为 Agent 兼容的渠道',
-    badge: '即将下线',
-    badgeTone: 'deprecated',
-  },
-  {
-    value: 'pi',
-    label: 'Pi',
-    description: 'Pi Agent SDK，MyYoda 默认内核，新功能仅在 Pi 上提供；可选择任意已启用模型渠道',
-    badge: '推荐',
-    badgeTone: 'recommended',
-  },
-]
-
-function AutomationRuntimeSelector({
-  runtime,
-  onChange,
-}: {
-  runtime: AgentRuntime
-  onChange: (runtime: AgentRuntime) => void
-}): React.ReactElement {
-  const [open, setOpen] = React.useState(false)
-  const current = AGENT_RUNTIME_OPTIONS.find((option) => option.value === runtime) ?? AGENT_RUNTIME_OPTIONS[0]!
-
-  const handleSelect = (nextRuntime: AgentRuntime): void => {
-    onChange(nextRuntime)
-    setOpen(false)
-  }
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="model-selector-trigger flex h-9 items-center justify-between rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors hover:bg-foreground/[0.02] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          aria-label={`Agent 内核：${current.label}`}
-        >
-          <span className="flex min-w-0 items-center gap-2">
-            <Box className="size-4 shrink-0 text-muted-foreground" />
-            <span className="truncate">{current.label}</span>
-          </span>
-          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-[260px] p-1.5" align="start" onOpenAutoFocus={(e) => e.preventDefault()}>
-        <div className="flex flex-col gap-1">
-          {AGENT_RUNTIME_OPTIONS.map((option) => {
-            const active = option.value === runtime
-            return (
-              <button
-                key={option.value}
-                type="button"
-                aria-pressed={active}
-                className={cn(
-                  'flex items-start gap-2 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-accent hover:text-accent-foreground',
-                  active && 'bg-accent text-accent-foreground',
-                )}
-                onClick={() => handleSelect(option.value)}
-              >
-                <Box className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-center gap-1.5">
-                    <span className="text-xs font-medium">{option.label}</span>
-                    {option.badge && (
-                      <span
-                        className={cn(
-                          'rounded-sm px-1 py-px text-[10px] font-medium leading-tight',
-                          option.badgeTone === 'deprecated'
-                            ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
-                            : 'bg-primary/10 text-primary',
-                        )}
-                      >
-                        {option.badge}
-                      </span>
-                    )}
-                  </span>
-                  <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">{option.description}</span>
-                </span>
-                {active && <Check className="mt-0.5 size-3.5 shrink-0" />}
-              </button>
-            )
-          })}
-        </div>
-      </PopoverContent>
-    </Popover>
-  )
-}
-
 export function AutomationFormView({ standalone = false }: { standalone?: boolean } = {}): React.ReactElement | null {
   const isWindows = React.useMemo(() => detectIsWindows(), [])
   const [formState, setFormState] = useAtom(automationFormAtom)
@@ -421,8 +328,6 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
     return map
   }, [workspaces])
   const automations = useAtomValue(automationsAtom)
-  const agentChannelIds = useAtomValue(agentChannelIdsAtom)
-  const defaultAgentRuntime = useAtomValue(agentRuntimeAtom)
   const [agentSessions, setAgentSessions] = useAtom(agentSessionsAtom)
   const activeSessionId = useAtomValue(activeSessionIdAtom)
   const currentAgentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
@@ -434,6 +339,7 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
   const openSession = useOpenSession()
 
   const [form, setForm] = React.useState<AutomationDraft | null>(null)
+  const [weekdayPresetOverride, setWeekdayPresetOverride] = React.useState<'custom' | null>(null)
   const [editingName, setEditingName] = React.useState(false)
   const [runningNow, setRunningNow] = React.useState(false)
   const [feishuBindings, setFeishuBindings] = React.useState<FeishuChatBinding[]>([])
@@ -455,12 +361,9 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
 
   React.useEffect(() => {
     if (formState.open && formState.draft) {
-      const draft = coerceAutomationDraftRuntime(
-        formState.draft,
-        defaultAgentRuntime,
-        agentChannelIds,
-      )
+      const draft = formState.draft
       setForm(draft)
+      setWeekdayPresetOverride(null)
       lastSavedSignatureRef.current = draft.id && canPersistDraft(draft)
         ? getDraftSignature(draft)
         : ''
@@ -470,8 +373,8 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
   }, [formState.open, formState.draft])
 
   // 新建模式下若 workspaceId 为空，按优先级填入默认值：
-  // 1. 当前 Agent 模式选中的空间（≈ 当前会话所在空间）
-  // 2. 第一个空间（fallback）
+  // 1. 当前 Agent 模式选中的工作区（≈ 当前会话所在工作区）
+  // 2. 第一个工作区（fallback）
   // 编辑模式不动；用户已显式选过的也不覆盖。
   React.useEffect(() => {
     if (!formState.open || !form || form.id || form.workspaceId) return
@@ -519,7 +422,7 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
         ? { ...latestDraft, id: latestDraft.id ?? previousId ?? draft.id }
         : { ...draft, id: draft.id ?? previousId ?? undefined }
 
-      // 不完整任务（缺模型 / 空间）强制不启用：避免无配置任务出现在「启用中」分组
+      // 不完整任务（缺模型 / 工作区）强制不启用：避免无配置任务出现在「启用中」分组
       const draftToSave: AutomationDraft = isReadyToRun(baseDraft)
         ? baseDraft
         : { ...baseDraft, active: false }
@@ -648,7 +551,7 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
   const handleRunNow = async (): Promise<void> => {
     const latest = latestFormRef.current
     if (!latest || !isReadyToRun(latest)) {
-      const missing = latest ? listMissingFields(latest) : ['任务名称', '任务描述', '模型', '空间']
+      const missing = latest ? listMissingFields(latest) : ['任务名称', '任务描述', '模型', '工作区']
       toast.error(`请先补全：${missing.join('、')}`)
       return
     }
@@ -735,15 +638,7 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
   const selectedModel = form.channelId && form.modelId
     ? { channelId: form.channelId, modelId: form.modelId }
     : null
-  const modelFilterChannelIds = form.agentRuntime === 'pi' ? undefined : agentChannelIds
-  const handleRuntimeChange = (runtime: AgentRuntime): void => {
-    const patch: Partial<AutomationDraft> = { agentRuntime: runtime }
-    if (runtime === 'claude' && form.channelId && !agentChannelIds.includes(form.channelId)) {
-      patch.channelId = ''
-      patch.modelId = undefined
-    }
-    update(patch)
-  }
+  const modelFilterChannelIds = undefined
   const feishuTarget = getFeishuTarget(form.notificationTargets)
   const selectedFeishuBinding = feishuTarget
     ? feishuBindings.find((binding) => binding.botId === feishuTarget.botId && binding.chatId === feishuTarget.chatId)
@@ -874,7 +769,7 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 pb-4 flex flex-col gap-5">
-          {/* 启用开关（最上）：模型 / 空间缺失时禁用，避免 UI 状态与持久化结果不一致 */}
+          {/* 启用开关（最上）：模型 / 工作区缺失时禁用，避免 UI 状态与持久化结果不一致 */}
           <div className="flex items-center justify-between">
             <div className="flex flex-col gap-0.5">
               <Label htmlFor="auto-active">启用</Label>
@@ -971,6 +866,76 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
                 />
                 <span className="text-xs text-muted-foreground shrink-0">分钟一次</span>
               </div>
+              <div className="flex items-center justify-between pt-1">
+                <div>
+                  <Label htmlFor="auto-window-enabled">仅在每日时段内运行</Label>
+                  <p className="mt-0.5 text-xs text-muted-foreground">留空则全天按间隔运行</p>
+                </div>
+                <Switch
+                  id="auto-window-enabled"
+                  checked={!!(form.activeWindowStart && form.activeWindowEnd)}
+                  onCheckedChange={(enabled) => update(enabled
+                    ? { activeWindowStart: form.activeWindowStart ?? '09:00', activeWindowEnd: form.activeWindowEnd ?? '18:00' }
+                    : { activeWindowStart: undefined, activeWindowEnd: undefined })}
+                />
+              </div>
+              {form.activeWindowStart && form.activeWindowEnd && (
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    aria-label="每日运行开始时间"
+                    type="time"
+                    value={form.activeWindowStart}
+                    onChange={(e) => update({ activeWindowStart: e.target.value })}
+                    className="flex h-9 min-w-0 flex-1 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  />
+                  <span className="text-xs text-muted-foreground">至</span>
+                  <input
+                    aria-label="每日运行结束时间"
+                    type="time"
+                    value={form.activeWindowEnd}
+                    onChange={(e) => update({ activeWindowEnd: e.target.value })}
+                    className="flex h-9 min-w-0 flex-1 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  />
+                </div>
+              )}
+              <div className="flex items-center justify-between pt-1">
+                <Label>运行日</Label>
+                <Select
+                  value={weekdayPresetOverride ?? getWeekdayPreset(form.activeWeekdays)}
+                  onValueChange={(value) => {
+                    if (value === 'custom') setWeekdayPresetOverride('custom')
+                    else setWeekdayPresetOverride(null)
+                    update({ activeWeekdays: getWeekdaysFromPreset(value, form.activeWeekdays) })
+                  }}
+                >
+                  <SelectTrigger className="h-9 w-[150px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="everyday">每天</SelectItem>
+                    <SelectItem value="weekdays">工作日（周一至周五）</SelectItem>
+                    <SelectItem value="weekends">周末（周六、周日）</SelectItem>
+                    <SelectItem value="custom">自定义</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {(weekdayPresetOverride ?? getWeekdayPreset(form.activeWeekdays)) === 'custom' && (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {AUTOMATION_WEEKDAY_OPTIONS.map((option) => {
+                    const selected = (form.activeWeekdays ?? []).includes(option.value)
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => update({ activeWeekdays: selected
+                          ? (form.activeWeekdays ?? []).filter((day) => day !== option.value)
+                          : [...(form.activeWeekdays ?? []), option.value].sort((a, b) => a - b) })}
+                        className={cn('rounded-md border px-2.5 py-1 text-xs transition-colors', selected ? 'border-primary bg-primary text-primary-foreground' : 'border-input text-muted-foreground hover:bg-foreground/[0.04]')}
+                      >
+                        {option.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -1114,52 +1079,24 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
             </div>
           )}
 
-          {/* Claude 内核默认关闭时，隐藏内核选择器（仅 Pi）。 */}
-          {CLAUDE_RUNTIME_ENABLED && (
-            <div className="flex flex-col gap-2">
-              <Label>Agent 内核</Label>
-              <AutomationRuntimeSelector runtime={form.agentRuntime} onChange={handleRuntimeChange} />
-              <span className="pl-2.5 text-xs text-muted-foreground leading-relaxed">
-                Pi 内核支持选择任意已启用模型渠道；Claude 内核仅显示已勾选为 Agent 兼容的渠道。
-              </span>
-            </div>
-          )}
-
-          {/* 选择模型（Claude 内核仅显示 Agent 兼容渠道；Pi 内核显示所有已启用渠道） */}
+          {/* 选择模型（Pi-only：显示所有已启用渠道） */}
           <div className="flex flex-col gap-2">
             <Label>选择模型</Label>
-            {form.agentRuntime === 'claude' && agentChannelIds.length === 0 ? (
-              <div className="flex items-center gap-2 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
-                <Settings size={14} className="shrink-0" />
-                <span>尚未启用任何 Agent 兼容渠道</span>
-                <button
-                  type="button"
-                  className="ml-auto text-xs underline underline-offset-2 hover:text-foreground transition-colors"
-                  onClick={() => {
-                    setSettingsTab('channels')
-                    setSettingsOpen(true)
-                  }}
-                >
-                  前往渠道设置
-                </button>
-              </div>
-            ) : (
-              <ModelSelector
-                filterChannelIds={modelFilterChannelIds}
-                externalSelectedModel={selectedModel}
-                showChannelInTrigger
-                onModelSelect={(opt) => update({ channelId: opt.channelId, modelId: opt.modelId })}
-              />
-            )}
+            <ModelSelector
+              filterChannelIds={modelFilterChannelIds}
+              externalSelectedModel={selectedModel}
+              showChannelInTrigger
+              onModelSelect={(opt) => update({ channelId: opt.channelId, modelId: opt.modelId })}
+            />
           </div>
 
-          {/* 空间（必选，默认填入当前会话所在空间） */}
+          {/* 工作区（必选，默认填入当前会话所在工作区） */}
           <div className="flex flex-col gap-2">
-            <Label>空间</Label>
+            <Label>工作区</Label>
             {workspaces.length === 0 ? (
               <div className="flex items-center gap-2 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
                 <Settings size={14} className="shrink-0" />
-                <span>尚未创建任何空间</span>
+                <span>尚未创建任何工作区</span>
                 <button
                   type="button"
                   className="ml-auto text-xs underline underline-offset-2 hover:text-foreground transition-colors"
@@ -1175,7 +1112,7 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
               <Select
                 value={form.workspaceId ?? ''}
                 onValueChange={(v) => {
-                  // 切换空间时，若当前已选项目不属于新空间，则解除项目挂载
+                  // 切换工作区时，若当前已选项目不属于新工作区，则解除项目挂载
                   const currentProject = form.projectId
                     ? pickableProjects.find((p) => p.id === form.projectId)
                     : undefined
@@ -1187,7 +1124,7 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
                   })
                 }}
               >
-                <SelectTrigger><SelectValue placeholder="选择空间" /></SelectTrigger>
+                <SelectTrigger><SelectValue placeholder="选择工作区" /></SelectTrigger>
                 <SelectContent>
                   {workspaces.map((ws) => (
                     <SelectItem key={ws.id} value={ws.id}>{ws.name}</SelectItem>
@@ -1259,7 +1196,7 @@ export function AutomationFormView({ standalone = false }: { standalone?: boolea
           <div className="flex flex-col gap-2">
             <Label>项目（可选）</Label>
             {!form.workspaceId ? (
-              <div className="px-0.5 text-xs leading-relaxed text-foreground/35">请先选择空间</div>
+              <div className="px-0.5 text-xs leading-relaxed text-foreground/35">请先选择工作区</div>
             ) : (
               <Select
                 value={form.projectId ?? NO_PROJECT}

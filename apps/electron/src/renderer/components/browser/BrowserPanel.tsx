@@ -1,289 +1,240 @@
-/**
- * BrowserPanel - 内嵌浏览器面板（synara 移植）
- *
- * 左侧栏「浏览器」入口对应的全屏视图。真正的网页内容由主进程的
- * WebContentsView 渲染并覆盖在本组件的 content-area 上；本组件负责：
- * - 工具栏（返回/前进/刷新/地址栏/打开）
- * - 把 content-area 的几何 bounds 同步给主进程（setBounds）
- * - 订阅主进程状态推送（URL/title/加载态）并渲染
- *
- * threadId = 当前活跃 Agent 会话的 sessionId。
- */
+import * as React from 'react'
+import { useAtomValue, useSetAtom } from 'jotai'
+import type { BrowserViewState } from '@myyoda/shared'
+import { ArrowLeft, ArrowRight, ExternalLink, Globe2, LoaderCircle, Plus, RefreshCw, ShieldAlert, Square, X } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { BROWSER_RISK_DISCLAIMER_VERSION } from '@/types/settings'
+import { detectIsWindows, getWindowControlsPaddingClass } from '@/lib/platform'
+import { cn } from '@/lib/utils'
+import { browserPendingNavigationMapAtom } from '@/atoms/browser-atoms'
+import { BrowserSlot } from './BrowserSlot'
+import { shouldReuseInitialBrowserTab } from './agent-browser-link-utils'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { useAtomValue } from 'jotai'
-import { activeSessionIdAtom } from '@/atoms/tab-atoms'
-import type { ThreadBrowserState } from '@myyoda/shared'
-
-const TOOLBAR_HEIGHT = 44
-
-interface PickedAnnotation {
-  id: string
-  ref: string
-  role?: string
-  name?: string
-  selector?: string
-  comment: string
+interface BrowserPanelProps {
+  sessionId: string
+  state: BrowserViewState | null
+  onClose: () => void
 }
 
-export function BrowserPanel(): React.JSX.Element {
-  const threadId = useAtomValue(activeSessionIdAtom)
-  const contentRef = useRef<HTMLDivElement | null>(null)
-  const threadRef = useRef<string | null>(null)
-  const [state, setState] = useState<ThreadBrowserState | null>(null)
-  const [urlInput, setUrlInput] = useState('')
-  const [picked, setPicked] = useState<PickedAnnotation[]>([])
-  const [picking, setPicking] = useState(false)
-  const zoomFactorRef = useRef(1)
-  const resyncBoundsRef = useRef<(() => void) | null>(null)
+export function BrowserPanel({ sessionId, state, onClose }: BrowserPanelProps): React.ReactElement {
+  const [url, setUrl] = React.useState(state?.url ?? '')
+  const [riskAcknowledged, setRiskAcknowledged] = React.useState<boolean | null>(null)
+  const [savingRiskAcknowledgement, setSavingRiskAcknowledgement] = React.useState(false)
+  const pendingNavigationUrl = useAtomValue(browserPendingNavigationMapAtom).get(sessionId)
+  const setPendingNavigationMap = useSetAtom(browserPendingNavigationMapAtom)
 
-  threadRef.current = threadId
-
-  // 页面缩放系数（Cmd+/Cmd-、菜单缩放、滚轮/触控板缩放）：WebContentsView.setBounds 用的是
-  // 窗口 DIP，getBoundingClientRect 返回的是当前缩放下的 CSS px，只有 100% 缩放时两者相等。
-  // 用 ref 而非 state，避免缩放变化时把 bounds-sync effect（依赖 [threadId, state?.open]）
-  // 重新触发导致不必要的 hide()/重新挂载；zoomFactorRef 变化后主动调一次 sync（见下方 effect）。
-  useEffect(() => {
+  React.useEffect(() => setUrl(state?.url ?? ''), [state?.url])
+  React.useEffect(() => {
     let cancelled = false
-    void window.electronAPI.getZoomFactor().then((factor) => {
-      if (!cancelled && Number.isFinite(factor) && factor > 0) zoomFactorRef.current = factor
-    })
-    const unsubscribe = window.electronAPI.onZoomFactorChange((factor) => {
-      if (Number.isFinite(factor) && factor > 0) {
-        zoomFactorRef.current = factor
-        resyncBoundsRef.current?.()
-      }
-    })
-    return () => { cancelled = true; unsubscribe() }
+    void window.electronAPI.getSettings()
+      .then((settings) => {
+        if (!cancelled) setRiskAcknowledged((settings.browserRiskDisclaimerVersion ?? 0) >= BROWSER_RISK_DISCLAIMER_VERSION)
+      })
+      .catch((error) => {
+        console.error('[受管浏览器] 读取风险告知状态失败:', error)
+        if (!cancelled) setRiskAcknowledged(false)
+      })
+    return () => { cancelled = true }
   }, [])
 
-  // 订阅状态推送
-  useEffect(() => {
-    const unsubscribe = window.electronAPI.browser.onStateChange((next) => {
-      if (next.threadId === threadRef.current) {
-        setState(next)
+  const navigate = React.useCallback(async () => {
+    const value = url.trim()
+    const navigateBrowser = (window.electronAPI as Partial<typeof window.electronAPI>).navigateAgentBrowser
+    if (!value || typeof navigateBrowser !== 'function') return
+    try { await navigateBrowser({ sessionId, url: value }) } catch (error) { console.error('[受管浏览器] 导航失败:', error) }
+  }, [sessionId, url])
+
+  const openInDefaultBrowser = React.useCallback(() => {
+    const value = url.trim()
+    if (value.startsWith('http://') || value.startsWith('https://')) void window.electronAPI.openExternal(value)
+  }, [url])
+
+  const close = React.useCallback(async () => {
+    const closeBrowser = (window.electronAPI as Partial<typeof window.electronAPI>).closeAgentBrowser
+    if (typeof closeBrowser !== 'function') { onClose(); return }
+    try {
+      await closeBrowser(sessionId)
+      onClose()
+    } catch (error) {
+      console.error('[受管浏览器] 关闭失败:', error)
+    }
+  }, [onClose, sessionId])
+
+  const acceptRiskDisclaimer = React.useCallback(async () => {
+    setSavingRiskAcknowledgement(true)
+    try {
+      await window.electronAPI.updateSettings({ browserRiskDisclaimerVersion: BROWSER_RISK_DISCLAIMER_VERSION })
+      setRiskAcknowledged(true)
+      if (pendingNavigationUrl) {
+        try {
+          const currentState = await window.electronAPI.getAgentBrowserState(sessionId)
+          if (!currentState) throw new Error('受管浏览器会话不存在。')
+          if (shouldReuseInitialBrowserTab(currentState)) {
+            await window.electronAPI.navigateAgentBrowser({ sessionId, url: pendingNavigationUrl })
+          } else {
+            await window.electronAPI.createAgentBrowserTab({ sessionId, url: pendingNavigationUrl })
+          }
+        } catch (error) {
+          console.error('[受管浏览器] 打开待处理链接失败:', error)
+        } finally {
+          setPendingNavigationMap((previous) => {
+            const next = new Map(previous)
+            next.delete(sessionId)
+            return next
+          })
+        }
       }
-    })
-    if (threadId) {
-      void window.electronAPI.browser.getState(threadId).then((s) => setState(s))
+    } catch (error) {
+      console.error('[受管浏览器] 保存风险告知确认失败:', error)
+    } finally {
+      setSavingRiskAcknowledgement(false)
     }
-    return unsubscribe
-  }, [threadId])
+  }, [pendingNavigationUrl, sessionId, setPendingNavigationMap])
 
-  // 订阅标注拾取结果 + 初次拉取
-  useEffect(() => {
-    const unsubscribe = window.electronAPI.browser.onAnnotationCommitted((tid, annotation) => {
-      if (tid === threadRef.current) {
-        setPicked((prev) => [...prev, annotation])
-      }
-    })
-    if (threadId) {
-      void window.electronAPI.browser.getAnnotations(threadId).then((list) => setPicked(list))
+  const stopBackgroundRun = React.useCallback(async () => {
+    if (state?.executionSource === 'user') return
+    try {
+      await window.electronAPI.stopAgent(sessionId)
+    } catch (error) {
+      console.error('[受管浏览器] 停止后台 Agent 失败:', error)
     }
-    return unsubscribe
-  }, [threadId])
+  }, [sessionId, state?.executionSource])
 
-  // content-area bounds 同步到主进程（WebContentsView 覆盖其上）
-  // 依赖 state?.open：Agent 先 browser_open、用户后切到面板时，contentRef 是
-  // open 后才条件渲染，effect 必须随 open 状态重新执行才能定位视图。
-  useEffect(() => {
-    if (!threadId || !state?.open) return
-    const el = contentRef.current
-    if (!el) return
+  const activeTabId = state?.activeTabId ?? ''
+  const agentTabId = state?.agentTabId ?? ''
+  const tabs = state?.tabs ?? []
+  const riskBlocked = riskAcknowledged !== true
+  const isBackgroundRun = state?.executionSource === 'automation' || state?.executionSource === 'delegation'
+  const activity = state?.activity ?? null
+  const activityStatus = activity?.status === 'unknown' ? '结果未知' : activity?.status === 'failed' ? '失败' : activity?.status === 'dispatched' ? '已派发' : '已完成'
+  const activityDomain = activity?.domain ? ` · ${activity.domain}` : ''
 
-    const sync = (): void => {
-      const rect = el.getBoundingClientRect()
-      // Electron WebContentsView.setBounds 使用窗口 DIP（逻辑像素）；getBoundingClientRect
-      // 返回的是当前页面缩放（zoomFactor）下的 CSS px。绝不能乘 devicePixelRatio（那是
-      // Retina 概念，与此无关，乘了会让视图在 Retina 屏上膨胀 2 倍覆盖工具栏）；但
-      // zoomFactor（Cmd+/Cmd- 或滚轮缩放，非 100% 时）必须乘，否则非 100% 缩放下视图
-      // 同样会错位/超出覆盖到地址栏导致无法点击输入。100% 时 zoomFactor=1，等价于直传。
-      const zoom = zoomFactorRef.current
-      window.electronAPI.browser.setBounds(threadId, {
-        x: Math.round(rect.left * zoom),
-        y: Math.round(rect.top * zoom),
-        width: Math.round(rect.width * zoom),
-        height: Math.round(rect.height * zoom),
-      })
-    }
-    resyncBoundsRef.current = sync
+  const selectTab = React.useCallback(async (tabId: string) => {
+    const select = (window.electronAPI as Partial<typeof window.electronAPI>).selectAgentBrowserTab
+    if (typeof select !== 'function') return
+    try { await select({ sessionId, tabId }) } catch (error) { console.error('[受管浏览器] 切换标签失败:', error) }
+  }, [sessionId])
 
-    sync()
-    const observer = new ResizeObserver(sync)
-    observer.observe(el)
-    window.addEventListener('resize', sync)
-    return () => {
-      resyncBoundsRef.current = null
-      observer.disconnect()
-      window.removeEventListener('resize', sync)
-      // 面板卸载/关闭时隐藏 WebContentsView，防止原生视图残留盖住其他视图
-      window.electronAPI.browser.hide(threadId)
-      // 退出拾取模式，避免下次打开面板时标注框仍可点击（状态残留）
-      window.electronAPI.browser.setAnnotationInteractive(threadId, false)
-    }
-  }, [threadId, state?.open])
+  const createTab = React.useCallback(async () => {
+    const create = (window.electronAPI as Partial<typeof window.electronAPI>).createAgentBrowserTab
+    if (typeof create !== 'function') return
+    try { await create({ sessionId }) } catch (error) { console.error('[受管浏览器] 新建标签失败:', error) }
+  }, [sessionId])
 
-  const openUrl = useCallback(async () => {
-    if (!threadId) return
-    const raw = urlInput.trim()
-    const url = raw && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw) ? `https://${raw}` : (raw || undefined)
-    await window.electronAPI.browser.open(threadId, url)
-    if (url) setUrlInput('')
-  }, [threadId, urlInput])
+  const closeTab = React.useCallback(async (tabId: string) => {
+    const closeBrowserTab = (window.electronAPI as Partial<typeof window.electronAPI>).closeAgentBrowserTab
+    if (typeof closeBrowserTab !== 'function') return
+    try {
+      const next = await closeBrowserTab({ sessionId, tabId })
+      if (!next) onClose()
+    } catch (error) { console.error('[受管浏览器] 关闭标签失败:', error) }
+  }, [onClose, sessionId])
 
-  const goBack = useCallback(async () => { if (threadId) void window.electronAPI.browser.back(threadId) }, [threadId])
-  const goForward = useCallback(async () => { if (threadId) void window.electronAPI.browser.forward(threadId) }, [threadId])
-  const reload = useCallback(async () => { if (threadId) void window.electronAPI.browser.reload(threadId) }, [threadId])
-  const closeBrowser = useCallback(async () => {
-    if (threadId) void window.electronAPI.browser.close(threadId)
-    setPicking(false)
-  }, [threadId])
-  const togglePicking = useCallback(async () => {
-    if (!threadId) return
-    const next = !picking
-    await window.electronAPI.browser.setAnnotationInteractive(threadId, next)
-    setPicking(next)
-  }, [threadId, picking])
-  const selectTab = useCallback(async (tabId: string) => { if (threadId) void window.electronAPI.browser.selectTab(threadId, tabId) }, [threadId])
-  const closeTab = useCallback(async (tabId: string) => { if (threadId) void window.electronAPI.browser.closeTab(threadId, tabId) }, [threadId])
-  const newTab = useCallback(async () => { if (threadId) void window.electronAPI.browser.open(threadId, undefined, true) }, [threadId])
-
-  const activeTab = state?.tabs.find((t) => t.id === state.activeTabId) ?? null
-
+  const title = state?.title || '受管浏览器'
+  const isWindows = React.useMemo(() => detectIsWindows(), [])
   return (
-    <div className="flex h-full flex-col bg-surface">
-      {/* Tab 条：多 tab 切换（Agent browser_open newTab / 工具栏新建） */}
-      {state?.open && state.tabs.length > 0 && (
-        <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-border px-2 py-1">
-          {state.tabs.map((tab) => (
-            <div
-              key={tab.id}
-              className={`group flex min-w-0 max-w-[180px] cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] ${tab.id === state.activeTabId ? 'border-accent bg-accent/10 text-foreground' : 'border-transparent text-foreground-muted hover:bg-surface-muted'}`}
-              onClick={() => void selectTab(tab.id)}
-              title={tab.title || tab.url}
-            >
-              <span className="truncate">{tab.title || tab.url || 'New tab'}</span>
-              <button
-                className="shrink-0 rounded p-0.5 text-foreground-muted opacity-0 hover:bg-surface-muted hover:text-foreground group-hover:opacity-100"
-                onClick={(e) => { e.stopPropagation(); void closeTab(tab.id) }}
-                title="关闭标签页"
-                aria-label={`关闭标签页 ${tab.title || ''}`}
-              >
-                ✕
-              </button>
-            </div>
-          ))}
-          <button
-            className="shrink-0 rounded-md px-2 py-1 text-xs text-foreground-muted hover:bg-surface-muted hover:text-foreground"
-            onClick={() => void newTab()}
-            title="新建标签页"
-            aria-label="新建标签页"
-          >
-            +
-          </button>
-        </div>
-      )}
-
-      {/* 工具栏 */}
-      <div
-        className="flex shrink-0 items-center gap-2 border-b border-border px-3"
-        style={{ height: TOOLBAR_HEIGHT }}
-      >
-        <button
-          className="btn-icon"
-          onClick={goBack}
-          disabled={!state?.open}
-          title="后退"
-          aria-label="后退"
-        >
-          ←
-        </button>
-        <button
-          className="btn-icon"
-          onClick={goForward}
-          disabled={!state?.open}
-          title="前进"
-          aria-label="前进"
-        >
-          →
-        </button>
-        <button
-          className="btn-icon"
-          onClick={reload}
-          disabled={!state?.open}
-          title="刷新"
-          aria-label="刷新"
-        >
-          ⟳
-        </button>
-        <form
-          className="flex flex-1 items-center gap-2"
-          onSubmit={(e) => { e.preventDefault(); void openUrl() }}
-        >
-          <input
-            className="h-7 w-full rounded-md border border-border bg-surface-muted px-2 text-xs text-foreground outline-none focus:border-accent"
-            value={activeTab?.url && !urlInput ? activeTab.url : urlInput}
-            onChange={(e) => setUrlInput(e.target.value)}
-            placeholder="输入网址或搜索，例如 example.com"
-            aria-label="地址栏"
-          />
+    <div className="flex flex-col h-full min-w-0 overflow-hidden bg-content-area titlebar-no-drag">
+      <div className={cn('flex items-center h-[42px] gap-1 px-2 border-b border-border/40 bg-muted/20', getWindowControlsPaddingClass(isWindows))}>
+        <Globe2 className="size-4 shrink-0 text-primary ml-1" />
+        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-7" disabled={riskBlocked || !state?.canGoBack} onClick={() => void window.electronAPI.goBackAgentBrowser?.(sessionId)}><ArrowLeft className="size-3.5" /></Button></TooltipTrigger><TooltipContent>后退</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-7" disabled={riskBlocked || !state?.canGoForward} onClick={() => void window.electronAPI.goForwardAgentBrowser?.(sessionId)}><ArrowRight className="size-3.5" /></Button></TooltipTrigger><TooltipContent>前进</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-7" disabled={riskBlocked} onClick={() => void window.electronAPI.reloadAgentBrowser?.(sessionId)}><RefreshCw className="size-3.5" /></Button></TooltipTrigger><TooltipContent>刷新</TooltipContent></Tooltip>
+        <form className="flex-1 min-w-0" onSubmit={(event) => { event.preventDefault(); if (!riskBlocked) void navigate() }}>
+          <Input disabled={riskBlocked} value={url} onChange={(event) => setUrl(event.target.value)} placeholder="输入域名或 URL（默认 HTTPS，仅公共网站）" className="h-7 text-xs bg-background/70" aria-label="浏览器地址" />
         </form>
-        <button
-          className={`btn-icon ${picking ? 'text-accent' : ''}`}
-          onClick={() => void togglePicking()}
-          disabled={!state?.open}
-          title={picking ? '退出拾取模式' : '拾取元素（点击页面标注框）'}
-          aria-label={picking ? '退出拾取模式' : '拾取元素'}
-        >
-          🖱️
-        </button>
-        <button
-          className="btn-icon"
-          onClick={closeBrowser}
-          disabled={!state?.open}
-          title="关闭浏览器"
-          aria-label="关闭浏览器"
-        >
-          ✕
-        </button>
+        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-7" disabled={!url.startsWith('http://') && !url.startsWith('https://')} onClick={openInDefaultBrowser} aria-label="在系统默认浏览器中打开当前网页"><ExternalLink className="size-3.5" /></Button></TooltipTrigger><TooltipContent>在系统默认浏览器中打开</TooltipContent></Tooltip>
+        {state?.loading && <LoaderCircle className="size-3.5 text-muted-foreground animate-spin" />}
+        {isBackgroundRun && (
+          <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-7 text-amber-600 hover:text-amber-700" onClick={() => void stopBackgroundRun()} aria-label="停止当前后台 Agent"><Square className="size-3.5 fill-current" /></Button></TooltipTrigger><TooltipContent>停止当前{state?.executionSource === 'automation' ? '自动任务' : '委派'}运行</TooltipContent></Tooltip>
+        )}
+        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-7" onClick={() => void close()}><X className="size-3.5" /></Button></TooltipTrigger><TooltipContent>关闭并销毁受管浏览器</TooltipContent></Tooltip>
       </div>
-
-      {/* 状态栏（加载态 / 错误） */}
-      {(activeTab?.isLoading || activeTab?.lastError) && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1 text-[11px] text-foreground-muted">
-          {activeTab?.isLoading && <span className="text-accent">加载中…</span>}
-          {activeTab?.lastError && <span className="text-red-500">错误: {activeTab.lastError}</span>}
-          {activeTab?.title && <span className="truncate">{activeTab.title}</span>}
-        </div>
-      )}
-
-      {/* 已拾取标注（用户点击页面标注框拾取的元素） */}
-      {picked.length > 0 && (
-        <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-border px-3 py-1.5">
-          <span className="shrink-0 text-[11px] font-medium text-foreground-muted">已拾取 {picked.length} 个元素：</span>
-          {picked.map((item) => (
-            <span key={`${item.ref}-${item.comment}`} className="shrink-0 rounded-md bg-accent/10 px-2 py-0.5 text-[11px] text-foreground">
-              [{item.ref}] {item.role ?? 'element'}{item.name ? ` “${item.name.slice(0, 24)}”` : ''}{item.comment ? ` · ${item.comment.slice(0, 30)}` : ''}
-            </span>
-          ))}
+      <div className="flex items-center h-8 gap-1 px-2 border-b border-border/30 bg-muted/10 overflow-x-auto scrollbar-none">
+        {tabs.map((tab) => (
           <button
-            className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-foreground-muted hover:bg-surface-muted hover:text-foreground"
-            onClick={() => { if (threadId) void window.electronAPI.browser.clearAnnotations(threadId); setPicked([]) }}
-            title="清空拾取结果"
+            key={tab.tabId}
+            type="button"
+            disabled={riskBlocked}
+            onClick={() => void selectTab(tab.tabId)}
+            className={`group flex items-center gap-1.5 h-6 min-w-[120px] max-w-[220px] px-2 rounded text-[11px] disabled:cursor-not-allowed disabled:opacity-50 ${tab.tabId === activeTabId ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'}`}
+            aria-label={`切换到 ${tab.title || '新建标签页'}${tab.openedByAgent ? '（由 Agent 创建）' : ''}`}
           >
-            ✕
+            <Globe2 className="size-3 shrink-0" />
+            <span className="truncate flex-1 text-left">{tab.title || '新建标签页'}</span>
+            {tab.openedByAgent && <span className="shrink-0 rounded bg-primary/10 px-1 py-px text-[9px] font-medium text-primary">Agent</span>}
+            <span
+              role="button"
+              tabIndex={0}
+              className="shrink-0 rounded p-0.5 opacity-50 hover:bg-muted hover:opacity-100"
+              aria-label={`关闭 ${tab.title || '标签'}`}
+              onClick={(event) => { event.stopPropagation(); void closeTab(tab.tabId) }}
+              onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); void closeTab(tab.tabId) } }}
+            >
+              <X className="size-3" />
+            </span>
           </button>
+        ))}
+        <Tooltip><TooltipTrigger asChild><Button type="button" variant="ghost" size="icon" className="size-6 shrink-0" disabled={riskBlocked} onClick={() => void createTab()} aria-label="新建浏览器标签"><Plus className="size-3.5" /></Button></TooltipTrigger><TooltipContent>新建标签</TooltipContent></Tooltip>
+      </div>
+      {activity && (
+        <div className="flex min-h-7 items-center gap-2 border-b border-border/25 bg-primary/[0.04] px-3 py-1 text-[11px]" role="status" aria-live="polite">
+          <span className="shrink-0 font-medium text-primary">Agent 活动</span>
+          <span className="shrink-0 text-muted-foreground">{activityStatus}</span>
+          <span className="truncate text-foreground/80">{activity.summary}{activityDomain}</span>
+          <span className="ml-auto shrink-0 text-muted-foreground">{activity.tabId === agentTabId ? '工作标签' : `标签 ${activity.tabId}`}</span>
         </div>
       )}
-
-      {/* 网页内容区：WebContentsView 覆盖在此区域 */}
-      {!state?.open ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-4 text-foreground-muted">
-          <div className="text-3xl">🌐</div>
-          <p className="text-sm">浏览器尚未打开。告诉 Agent「打开浏览器」或用上方地址栏打开。</p>
-        </div>
+      {riskAcknowledged === true ? (
+        <BrowserSlot key={activeTabId} sessionId={sessionId} tabId={activeTabId} />
       ) : (
-        <div ref={contentRef} className="relative flex-1 overflow-hidden" data-browser-content />
+        <div className="flex flex-1 min-h-0 items-center justify-center bg-muted/15 px-8 text-center">
+          <div className="max-w-sm space-y-2 text-muted-foreground">
+            <ShieldAlert className="mx-auto size-7 text-amber-500/90" />
+            <p className="text-sm font-medium text-foreground">使用前请阅读风险告知</p>
+            <p className="text-xs leading-5">受管浏览器将在确认后启用，登录状态只保存在本机。</p>
+          </div>
+        </div>
+      )}
+      <AlertDialog open={riskAcknowledged === false} onOpenChange={(open) => { if (!open && !savingRiskAcknowledgement) void close() }}>
+        <AlertDialogContent className="max-w-xl">
+          <AlertDialogHeader>
+            <div className="mb-1 flex size-10 items-center justify-center rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400">
+              <ShieldAlert className="size-5" />
+            </div>
+            <AlertDialogTitle className="text-balance">首次使用受管浏览器</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 text-left leading-6">
+                <p>MyYoda 可让 Agent 在浏览器中读取、搜索、点击和输入。部分平台可能将这些行为或高频操作识别为自动化活动。</p>
+                <p>这可能导致验证码、限流、功能限制、账号风控，严重时可能造成账号处罚或封禁。请自行了解并遵守目标平台规则，并自行承担相应风险。</p>
+                <p className="text-xs">MyYoda 不会保证第三方平台接受这些操作；请避免不必要的高频互动，并在重要操作前核对页面状态。</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={savingRiskAcknowledgement}>暂不使用</AlertDialogCancel>
+            <Button type="button" disabled={savingRiskAcknowledgement} onClick={() => void acceptRiskDisclaimer()}>
+              {savingRiskAcknowledgement ? '正在确认…' : '我已知悉并承担风险'}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {state && state.trace.length > 0 && (
+        <div className="flex items-center h-7 px-3 gap-2 border-t border-border/30 text-[11px] text-muted-foreground bg-muted/15">
+          <span className="shrink-0 text-primary/80">Agent 操作</span>
+          <span className="truncate">{state.trace[state.trace.length - 1]?.summary}</span>
+          <span className="ml-auto shrink-0 hidden lg:inline">点击与输入目标会短暂高亮</span>
+        </div>
       )}
     </div>
   )

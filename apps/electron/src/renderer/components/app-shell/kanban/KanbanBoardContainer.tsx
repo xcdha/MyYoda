@@ -19,6 +19,7 @@ import {
   serverTaskSummariesAtom,
 } from '@/atoms/kanban-atoms'
 import {
+  activeTaskEditorTargetAtom,
   pendingTaskEditorTargetAtom,
   serverKanbanProjectsAtom,
   taskBoardScopeAtom,
@@ -112,7 +113,8 @@ export function KanbanBoardContainer({
   const setChannelsLoaded = useSetAtom(channelsLoadedAtom)
   const agentModelId = useAtomValue(agentModelIdAtom)
   const [workspaceRoot, setWorkspaceRoot] = React.useState<string | null>(null)
-  const [editorTarget, setEditorTarget] = React.useState<TaskEditorTarget | null>(null)
+  // 使用持久化 atom 替代 local state，防止 KanbanBoardContainer 重载时丢失 TaskEditor
+  const [editorTarget, setEditorTarget] = useAtom(activeTaskEditorTargetAtom)
   const pendingEditorTarget = useAtomValue(pendingTaskEditorTargetAtom)
   const setPendingEditorTarget = useSetAtom(pendingTaskEditorTargetAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
@@ -342,7 +344,7 @@ export function KanbanBoardContainer({
     if (pendingDeleteItem.task && !pendingDeleteItem.task.legacyIdentity) {
       if (!workspaceRoot || !workspace) return
       const taskSlug = pendingDeleteItem.task.taskSlug
-      void window.electronAPI.tasks.delete(workspaceRoot, workspace.id, taskSlug)
+      void window.electronAPI.tasks.delete(workspaceRoot, workspace.id, taskSlug, deleteImpact?.confirmationToken)
         .then(() => {
           setTaskSummaries((tasks) => tasks?.filter((t) => t.taskId !== pendingDeleteItem?.task?.taskId))
           toast.success('Task 已永久删除')
@@ -578,9 +580,9 @@ export function KanbanBoardContainer({
             setProjects((current) => [project, ...current.filter((candidate) => candidate.id !== project.id)])
             setScope({ kind: 'project', projectId: project.id })
             setCreateProjectOpen(false)
-            toast.success(`已创建工作区「${project.name}」`)
+            toast.success(`已创建项目「${project.name}」`)
           }).catch((cause: unknown) => {
-            toast.error('创建工作区失败', { description: cause instanceof Error ? cause.message : String(cause) })
+            toast.error('创建项目失败', { description: cause instanceof Error ? cause.message : String(cause) })
           }).finally(() => setCreatingProject(false))
         }}
       />

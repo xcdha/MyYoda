@@ -20,30 +20,32 @@ import {
   getAgentSessionMessagesPath,
   getAgentSessionWorkspacePath,
   getAgentWorkspacePath,
+  getWorkspaceFilesDir,
   getSdkConfigDir,
 } from './config-paths'
 import { getAgentWorkspace, getWorkspaceAutoMemoryDir, listAgentWorkspaces } from './agent-workspace-manager'
-import { removeSessionWorktree } from './git-session-context-service'
+import { assertWorktreeClean, removeSessionWorktree } from './git-session-context-service'
 
-// 在模块加载时一次性设置 SDK 配置目录，避免在 forkSession 等异步调用中临时修改/恢复
-// process.env 导致的并发安全问题（异步操作的 await 间隙其他代码可能读到错误值）
-if (!process.env.CLAUDE_CONFIG_DIR) {
-  process.env.CLAUDE_CONFIG_DIR = getSdkConfigDir()
-}
 import type {
   AgentSessionMeta,
   AgentMessage,
+  SDKUserMessage,
+  SkillActivation,
+  AgentWorkspace,
   SDKMessage,
   ForkSessionInput,
   AgentMessageSearchResult,
   AgentSessionReferenceSearchInput,
   AgentSessionReferenceSearchResult,
   AgentRuntime,
+  AgentCwdMode,
+  AgentActiveWorktree,
+  SessionWorkbenchLayout,
 } from '@myyoda/shared'
 import {
-  DEFAULT_AGENT_THINKING_LEVEL,
   getSessionThinkingLevel,
   migratePermissionMode,
+  mergeSkillActivations,
   sessionThinkingLevelPatch,
 } from '@myyoda/shared'
 import { getConversationMessages } from './conversation-manager'
@@ -52,8 +54,8 @@ import { convertLegacyMessage } from '@myyoda/session-core'
 import { clearNanoBananaAgentHistory } from './chat-tools/nano-banana-mcp'
 import { assertEnabledModelForChannel } from './agent-model-selection'
 import { copyForkWorkspaceFiles } from './agent-fork-workspace-copy'
-import { getSettings } from './settings-service'
-import { applyClaudeSdkAttributionSettings, isGitAttributionEnabled } from './agent-git-attribution'
+import { isGitAttributionEnabled } from './agent-git-attribution'
+import { assertRecoveryRootSafe, quarantineForRecovery, type RecoveryTrashRecord } from './recovery-trash-service'
 
 /**
  * 会话索引文件格式
@@ -214,6 +216,40 @@ function migrateMessageCountBackfill(index: AgentSessionsIndex): boolean {
 }
 
 /**
+ * Claude runtime 已退役。历史 transcript 仍由 MyYoda JSONL 展示，但 Claude session
+ * artifact 不能交给 Pi SessionManager 恢复，否则会被误识别为 Pi JSONL。
+ */
+function migrateRetiredClaudeRuntime(index: AgentSessionsIndex): boolean {
+  let changed = false
+  const treatMissingRuntimeAsLegacy = index.version < INDEX_VERSION
+  for (const session of index.sessions) {
+    const raw = session as AgentSessionMeta & { agentRuntime?: unknown }
+    const runtime = raw.agentRuntime
+
+    // Pi records written by the previous dual-runtime version keep their artifact.
+    if (runtime === 'pi') {
+      delete raw.agentRuntime
+      changed = true
+      continue
+    }
+    if (session.legacyTranscript?.sourceRuntime === 'claude') continue
+    // New Pi-only records intentionally have no runtime field. Only pre-v2 absence means
+    // legacy Claude, whose artifacts are not interoperable with Pi.
+    if (runtime === undefined && !treatMissingRuntimeAsLegacy) continue
+
+    session.legacyTranscript = { sourceRuntime: 'claude', continuationRequired: true }
+    delete raw.agentRuntime
+    session.sdkSessionId = undefined
+    session.piSessionFile = undefined
+    session.piEntryBindings = undefined
+    delete (raw as { forkSourceSdkSessionId?: unknown }).forkSourceSdkSessionId
+    delete (raw as { resumeAtMessageUuid?: unknown }).resumeAtMessageUuid
+    changed = true
+  }
+  return changed
+}
+
+/**
  * 读取会话索引文件
  */
 function readIndex(): AgentSessionsIndex {
@@ -224,7 +260,8 @@ function readIndex(): AgentSessionsIndex {
     const thinkingDefaultMigrated = migrateLegacyOpenAIThinkingDefault(data)
     const thinkingFieldMigrated = migrateThinkingLevelField(data)
     const messageCountMigrated = migrateMessageCountBackfill(data)
-    if (permissionModeMigrated || thinkingDefaultMigrated || thinkingFieldMigrated || messageCountMigrated) {
+    const claudeRuntimeMigrated = migrateRetiredClaudeRuntime(data)
+    if (permissionModeMigrated || thinkingDefaultMigrated || thinkingFieldMigrated || messageCountMigrated || claudeRuntimeMigrated) {
       writeIndex(data)
       if (permissionModeMigrated) {
         console.log('[Agent 会话] 已迁移历史权限模式 auto → bypassPermissions')
@@ -234,6 +271,9 @@ function readIndex(): AgentSessionsIndex {
       }
       if (messageCountMigrated) {
         console.log('[Agent 会话] 已为历史任务会话补齐消息计数')
+      }
+      if (claudeRuntimeMigrated) {
+        console.log('[Agent 会话] 已迁移退役 Claude runtime 会话为只读（Pi-only）')
       }
     }
     return data
@@ -276,6 +316,64 @@ export function getAgentSessionMeta(id: string): AgentSessionMeta | undefined {
   return index.sessions.find((s) => s.id === id)
 }
 
+/** 缺少标记的存量会话必须保持升级前的私有 workbench cwd。 */
+export function getAgentCwdMode(meta?: Pick<AgentSessionMeta, 'agentCwdMode'>): AgentCwdMode {
+  return meta?.agentCwdMode ?? 'session'
+}
+
+/** 只接受仍存在的绝对目录；Git 归属校验由调用主进程在启动 Agent 前完成。 */
+export function getActiveWorktreePath(
+  meta?: Pick<AgentSessionMeta, 'activeWorktree'>,
+): string | undefined {
+  const activeWorktree = meta?.activeWorktree
+  if (!activeWorktree?.path || !isAbsolute(activeWorktree.path)) return undefined
+  try {
+    return statSync(activeWorktree.path).isDirectory() ? activeWorktree.path : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 缺少标记的历史会话继续使用 `.context/`，避免失效的计划和工具历史路径。 */
+export function getSessionWorkbenchLayout(
+  meta?: Pick<AgentSessionMeta, 'sessionWorkbenchLayout'>,
+): SessionWorkbenchLayout {
+  return meta?.sessionWorkbenchLayout ?? 'legacy-context'
+}
+
+/** 会话私有资料目录；新布局直接使用 workbench 根，旧布局保留 `.context/`。 */
+export function resolveSessionWorkbenchContextDir(
+  workspace: Pick<AgentWorkspace, 'slug'> | undefined,
+  sessionId: string,
+  layout?: SessionWorkbenchLayout,
+): string | undefined {
+  if (!workspace) return undefined
+  const sessionDir = getAgentSessionWorkspacePath(workspace.slug, sessionId)
+  return layout === 'root' ? sessionDir : join(sessionDir, '.context')
+}
+
+/** Agent 运行 cwd 与 MyYoda 会话 sidecar 工作台目录解析。 */
+export function resolveAgentCwd(
+  workspace: Pick<AgentWorkspace, 'slug'> | undefined,
+  sessionId: string,
+  agentCwdMode?: AgentCwdMode,
+  activeWorktree?: AgentActiveWorktree,
+): string | undefined {
+  if (!workspace) return undefined
+  const activeWorktreePath = getActiveWorktreePath({ activeWorktree })
+  if (activeWorktreePath) return activeWorktreePath
+  return getAgentCwdMode({ agentCwdMode }) === 'project'
+    ? getWorkspaceFilesDir(workspace.slug)
+    : getAgentSessionWorkspacePath(workspace.slug, sessionId)
+}
+
+export function resolveAgentWorkbenchDir(
+  workspace: Pick<AgentWorkspace, 'slug'> | undefined,
+  sessionId: string,
+): string | undefined {
+  if (!workspace) return undefined
+  return getAgentSessionWorkspacePath(workspace.slug, sessionId)
+}
 /**
  * 创建新会话
  */
@@ -284,11 +382,10 @@ export function createAgentSession(
   channelId?: string,
   workspaceId?: string,
   modelId?: string,
-  agentRuntime: AgentRuntime = 'pi',
+  agentCwdMode?: 'session' | 'project',
 ): AgentSessionMeta {
   const index = readIndex()
   const now = Date.now()
-  const defaultLevel = getSettings().defaultThinkingLevel ?? DEFAULT_AGENT_THINKING_LEVEL
 
   const meta: AgentSessionMeta = {
     id: randomUUID(),
@@ -296,11 +393,11 @@ export function createAgentSession(
     channelId,
     modelId,
     workspaceId,
-    agentRuntime,
     // 新会话遵循「优先使用绑定 Project 工作目录」语义；历史会话字段缺失按 'session' 解释。
-    agentCwdMode: 'project',
-    // 思考深度从创建起归属于会话（对齐 craft sticky ThinkingLevel）
-    ...sessionThinkingLevelPatch(defaultLevel),
+    agentCwdMode: workspaceId ? agentCwdMode ?? 'project' : undefined,
+    // 思考深度留空 = 未设置：由运行期解析链决定生效值（编码优化开关 → max，否则 defaultThinkingLevel）。
+    // 注意：历史实现曾在此写入默认档（high），导致所有会话都有 sticky 值、开关永远无法覆盖。
+    // 用户显式调整后仍会写入（updateAgentSessionMeta → sessionThinkingLevelPatch），会话级优先语义不变。
     createdAt: now,
     updatedAt: now,
   }
@@ -337,14 +434,6 @@ export function createAgentSession(
       const autoMemoryDirectory = getWorkspaceAutoMemoryDir(ws.slug)
       if (sdkSettings.autoMemoryDirectory !== autoMemoryDirectory) {
         sdkSettings.autoMemoryDirectory = autoMemoryDirectory
-        needsWrite = true
-      }
-      // MyYoda Git/PR 推广标识：覆盖 Claude SDK 默认 Co-Authored-By
-      if (applyClaudeSdkAttributionSettings(
-        sdkSettings,
-        isGitAttributionEnabled(getSettings().gitAttributionEnabled),
-        modelId,
-      )) {
         needsWrite = true
       }
       if (needsWrite) {
@@ -419,6 +508,12 @@ const TRUNCATED_PREVIEW_LENGTH = 2000
  */
 export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
   if (messages.length === 0) return
+
+  // 删除/级联删除后的迟到流事件不得重新创建孤儿 JSONL；先确认会话仍在索引中。
+  const sessionExists = readIndex().sessions.some((session) => session.id === id)
+  if (!sessionExists) {
+    throw new Error(`Agent 会话不存在，禁止追加消息: ${id}`)
+  }
 
   const filePath = getAgentSessionMessagesPath(id)
 
@@ -567,7 +662,7 @@ export function getRecentAgentSessionSDKMessages(
 /**
  * 更新会话元数据
  */
-export type AgentSessionMetaUpdates = Partial<Pick<AgentSessionMeta, 'title' | 'titleSource' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'agentRuntime' | 'codexFastMode' | 'reasoningLevel' | 'thinkingLevel' | 'openAIThinkingLevel' | 'workspaceId' | 'pinned' | 'starred' | 'archived' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'sessionStatus' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal' | 'projectId' | 'agentCwdMode' | 'customGroupId' | 'workingDirectory' | 'gitRepoPath' | 'gitBranch' | 'gitExecutionMode' | 'gitWorktreePath' | 'gitBaseRef' | 'kanbanColumn' | 'taskSlug' | 'taskRunId' | 'taskNodeId' | 'taskAttempt' | 'taskCorrelationKey' | 'taskNodeCount' | 'taskDraft' | 'labelIds'>>
+export type AgentSessionMetaUpdates = Partial<Pick<AgentSessionMeta, 'title' | 'titleSource' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'codexFastMode' | 'reasoningLevel' | 'thinkingLevel' | 'openAIThinkingLevel' | 'workspaceId' | 'activeWorktree' | 'pinned' | 'starred' | 'archived' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'sessionStatus' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal' | 'projectId' | 'agentCwdMode' | 'activeWorktree' | 'customGroupId' | 'workingDirectory' | 'gitRepoPath' | 'gitBranch' | 'gitExecutionMode' | 'gitWorktreePath' | 'gitBaseRef' | 'kanbanColumn' | 'taskSlug' | 'taskRunId' | 'taskNodeId' | 'taskAttempt' | 'taskCorrelationKey' | 'taskNodeCount' | 'taskDraft' | 'labelIds'>>
 
 export function updateAgentSessionMeta(
   id: string,
@@ -632,8 +727,51 @@ export function setSessionProjectId(id: string, projectId: string): AgentSession
 }
 
 /**
+ * 在任何工作区级级联副作用前，确认会话关联的 Worktree 可以安全删除。
+ */
+export function assertAgentSessionDeletionSafe(id: string, requireWorktreeClean = false): void {
+  const index = readIndex()
+  const candidate = index.sessions.find((session) => session.id === id)
+  if (!candidate) return
+
+  // 先检查所有会话级 recovery roots，Workspace cascade 才能在任何 Session 副作用前 fail closed。
+  assertRecoveryRootSafe(getAgentSessionsDir())
+  if (candidate.workspaceId) {
+    const workspace = getAgentWorkspace(candidate.workspaceId)
+    if (workspace) assertRecoveryRootSafe(getAgentWorkspacePath(workspace.slug))
+  }
+  const sdkSessionIds = [candidate.sdkSessionId, candidate.forkSourceSdkSessionId].filter(Boolean)
+  if (sdkSessionIds.length > 0) assertRecoveryRootSafe(getSdkConfigDir())
+
+  if (!candidate.gitWorktreePath || !candidate.gitRepoPath) return
+  const stillReferenced = index.sessions.some((session) => session.id !== id && session.gitWorktreePath === candidate.gitWorktreePath)
+  if (requireWorktreeClean || !stillReferenced) assertWorktreeClean(candidate.gitWorktreePath)
+}
+
+/**
  * 删除会话
  */
+function restoreQuarantinedSessionArtifacts(records: RecoveryTrashRecord[]): Error[] {
+  const errors: Error[] = []
+  for (const record of records.slice().reverse()) {
+    if (existsSync(record.sourcePath) || !existsSync(record.quarantinePath)) continue
+    try {
+      renameWithRetry(record.quarantinePath, record.sourcePath)
+    } catch (error) {
+      const restoreError = error instanceof Error ? error : new Error(String(error))
+      errors.push(restoreError)
+      console.error(`[Agent 会话] 恢复隔离文件失败 (${record.sourcePath}):`, restoreError)
+    }
+  }
+  return errors
+}
+
+function restoreDeletedSessionIndex(originalSessions: AgentSessionMeta[]): void {
+  const current = readIndex()
+  current.sessions = originalSessions
+  writeIndex(current)
+}
+
 export function deleteAgentSession(id: string): void {
   const index = readIndex()
   const idx = index.sessions.findIndex((s) => s.id === id)
@@ -643,95 +781,96 @@ export function deleteAgentSession(id: string): void {
     return
   }
 
+  assertAgentSessionDeletionSafe(id)
+
+  const originalSessions = [...index.sessions]
   const removed = index.sessions.splice(idx, 1)[0]!
   writeIndex(index)
 
-  // 删除消息文件
-  const filePath = getAgentSessionMessagesPath(id)
-  if (existsSync(filePath)) {
-    try {
-      unlinkSync(filePath)
-    } catch (error) {
-      console.warn(`[Agent 会话] 删除消息文件失败 (${id}):`, error)
+  // Session 的消息、工作目录和 SDK 关联数据都进入同卷 recovery journal；任何一步失败都
+  // 保留源文件并恢复索引，避免 Renderer 把部分删除误报为成功。
+  const recoveryRecords: RecoveryTrashRecord[] = []
+  const rollbackSessionDeletion = (error: unknown): never => {
+    const restoreErrors = restoreQuarantinedSessionArtifacts(recoveryRecords)
+    if (restoreErrors.length > 0) {
+      // 恢复不完整时不要恢复索引，否则会制造“索引存在但源文件缺失”的假成功状态；
+      // 隔离目录和 operation journal 仍保留，后续可人工恢复。
+      throw new Error(`会话删除失败且恢复未完成，已保留 recovery 隔离记录: ${id}`, {
+        cause: restoreErrors[0] ?? error,
+      })
     }
+    try {
+      restoreDeletedSessionIndex(originalSessions)
+    } catch (restoreError) {
+      console.error(`[Agent 会话] 删除失败后恢复会话索引失败 (${id}):`, restoreError)
+    }
+    throw error
   }
 
-  // 清理 session 工作目录
-  if (removed.workspaceId) {
-    const ws = getAgentWorkspace(removed.workspaceId)
-    if (ws) {
-      try {
-        const sessionDir = getAgentSessionWorkspacePath(ws.slug, id)
+  try {
+    const filePath = getAgentSessionMessagesPath(id)
+    if (existsSync(filePath)) {
+      recoveryRecords.push(quarantineForRecovery(getAgentSessionsDir(), filePath, 'session', id))
+    }
+
+    if (removed.workspaceId) {
+      const ws = getAgentWorkspace(removed.workspaceId)
+      if (ws) {
+        // 不调用 getAgentSessionWorkspacePath：该 helper 会为缺失目录创建目录，删除流程不应
+        // 因读取而产生新的用户文件。
+        const sessionDir = join(getAgentWorkspacePath(ws.slug), id)
         if (existsSync(sessionDir)) {
-          rmSyncWithRetry(sessionDir, { recursive: true, force: true })
-          console.log(`[Agent 会话] 已清理 session 工作目录: ${sessionDir}`)
+          recoveryRecords.push(quarantineForRecovery(getAgentWorkspacePath(ws.slug), sessionDir, 'session', id))
         }
-      } catch (error) {
-        console.warn(`[Agent 会话] 清理 session 工作目录失败 (${id}):`, error)
       }
     }
+
+    const sdkSessionIds = [removed.sdkSessionId, removed.forkSourceSdkSessionId].filter(Boolean) as string[]
+    if (sdkSessionIds.length > 0) {
+      const sdkConfigDir = getSdkConfigDir()
+      const fileHistoryDir = join(sdkConfigDir, 'file-history')
+      for (const sid of sdkSessionIds) {
+        const histDir = join(fileHistoryDir, sid)
+        if (existsSync(histDir)) {
+          recoveryRecords.push(quarantineForRecovery(sdkConfigDir, histDir, 'session', id))
+        }
+      }
+
+      const projectsDir = join(sdkConfigDir, 'projects')
+      if (existsSync(projectsDir)) {
+        for (const hashDir of readdirSync(projectsDir)) {
+          const projPath = join(projectsDir, hashDir)
+          for (const sid of sdkSessionIds) {
+            const sessionFile = join(projPath, `${sid}.jsonl`)
+            if (existsSync(sessionFile)) {
+              recoveryRecords.push(quarantineForRecovery(sdkConfigDir, sessionFile, 'session', id))
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    rollbackSessionDeletion(error)
   }
 
-  // 清理 Git Worktree（若会话使用 Worktree 执行模式）；其他会话仍指向同一 worktree 时跳过，
-  // 避免误删还在被使用的工作目录（例如历史遗留的同名 worktree 复用场景）。
-  if (removed.gitWorktreePath && removed.gitRepoPath) {
-    const stillReferenced = index.sessions.some((s) => s.gitWorktreePath === removed.gitWorktreePath)
+  // Worktree 是最后一个破坏性步骤：只有所有可恢复文件都已成功 quarantine 后才调用 Git
+  // 删除。若 Git 删除失败，rollback 会把已隔离文件移回原位并恢复 Session 索引。
+  if (removed.gitWorktreePath && removed.gitRepoPath && existsSync(removed.gitWorktreePath)) {
+    const stillReferenced = originalSessions.some((session) => session.id !== id && session.gitWorktreePath === removed.gitWorktreePath)
     if (!stillReferenced) {
       try {
         removeSessionWorktree(removed.gitRepoPath, removed.gitWorktreePath)
         console.log(`[Agent 会话] 已清理 Git Worktree: ${removed.gitWorktreePath}`)
       } catch (error) {
-        console.warn(`[Agent 会话] 清理 Git Worktree 失败 (${id}):`, error)
+        rollbackSessionDeletion(error)
       }
     }
   }
 
   console.log(`[Agent 会话] 已删除会话: ${removed.title} (${removed.id})`)
 
-  // 清理 Nano Banana 生图历史
+  // 清理 Nano Banana 生图历史（仅内存缓存，不是用户源文件）。
   clearNanoBananaAgentHistory(id)
-
-  // 清理 SDK 关联数据（file-history 和 projects 下的 session JSONL）
-  const sdkSessionIds = [removed.sdkSessionId, removed.forkSourceSdkSessionId].filter(Boolean) as string[]
-  if (sdkSessionIds.length > 0) {
-    const sdkConfigDir = getSdkConfigDir()
-
-    const fileHistoryDir = join(sdkConfigDir, 'file-history')
-    for (const sid of sdkSessionIds) {
-      const histDir = join(fileHistoryDir, sid)
-      if (existsSync(histDir)) {
-        try {
-          rmSyncWithRetry(histDir, { recursive: true, force: true })
-          console.log(`[Agent 会话] 已清理 file-history: ${sid}`)
-        } catch (e) {
-          console.warn(`[Agent 会话] 清理 file-history 失败 (${sid}):`, e)
-        }
-      }
-    }
-
-    const projectsDir = join(sdkConfigDir, 'projects')
-    if (existsSync(projectsDir)) {
-      try {
-        for (const hashDir of readdirSync(projectsDir)) {
-          const projPath = join(projectsDir, hashDir)
-          for (const sid of sdkSessionIds) {
-            const sessionFile = join(projPath, `${sid}.jsonl`)
-            if (existsSync(sessionFile)) {
-              try {
-                unlinkSync(sessionFile)
-                console.log(`[Agent 会话] 已清理 SDK session 文件: ${sessionFile}`)
-              } catch (e) {
-                console.warn('[Agent 会话] 清理 SDK session 文件失败:', e)
-              }
-            }
-          }
-          try {
-            if (readdirSync(projPath).length === 0) rmSyncWithRetry(projPath, { recursive: true })
-          } catch { /* ignore */ }
-        }
-      } catch { /* ignore */ }
-    }
-  }
 }
 
 /**
@@ -833,7 +972,12 @@ export function moveSessionToWorkspace(sessionId: string, targetWorkspaceId: str
     const updated: AgentSessionMeta = {
       ...current,
       workspaceId: targetWorkspaceId,
-      sdkSessionId: undefined, // SDK 上下文与工作区 cwd 绑定，必须清空
+      // Pi artifact 与 entry bindings 都以原 cwd 为根；跨工作区复用会造成错误 resume/fork/rewind。
+      sdkSessionId: undefined,
+      piSessionFile: undefined,
+      piEntryBindings: undefined,
+      // 已切换到另一项目，不能沿用旧项目授权下选择的 worktree。
+      activeWorktree: undefined,
       updatedAt: now,
     }
     index.sessions[i] = updated
@@ -909,177 +1053,18 @@ export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSe
     throw new Error(`源 Agent 会话不存在: ${sessionId}`)
   }
 
+  if (sourceMeta.legacyTranscript?.continuationRequired) {
+    throw new Error('历史 Claude transcript 为只读，不能分叉；请新建 Pi 会话继续')
+  }
+
   if (!sourceMeta.sdkSessionId) {
     throw new Error('该会话没有 SDK session，无法分叉')
   }
 
-  if (sourceMeta.agentRuntime === 'pi') {
-    return forkPiAgentSession(sourceMeta, input)
-  }
-
-  const forkModelId = input.modelId !== undefined
-    ? assertEnabledModelForChannel({
-        channelId: sourceMeta.channelId,
-        modelId: input.modelId,
-        purpose: '分叉 Agent 会话',
-      })
-    : sourceMeta.modelId
-
-  // 2. 确定源会话的工作目录（SDK 需要从此目录的项目空间读取 session 文件）
-  let sourceDir: string | undefined
-  if (sourceMeta.workspaceId) {
-    const ws = getAgentWorkspace(sourceMeta.workspaceId)
-    if (ws) {
-      sourceDir = getAgentSessionWorkspacePath(ws.slug, sessionId)
-    }
-  }
-
-  // 2.5 校验目标消息并确定其所属的 SDK session ID
-  // - 当会话经历过 "session not found" 恢复后，sdkSessionId 会被替换为新的，
-  //   但旧消息仍保留在 MyYoda JSONL 中，其 session_id 指向旧的 SDK session。
-  // - 若目标消息是 sub-agent 输出（parent_tool_use_id 非空），SDK forkSession
-  //   会过滤掉 sidechain 后再查 upToMessageId，必然报 "not found"，
-  //   这里自动回溯到最近的主线 assistant uuid。
-  let forkSourceSdkSessionId = sourceMeta.sdkSessionId
-  let effectiveUpToMessageUuid = upToMessageUuid
-  if (upToMessageUuid) {
-    const forkTarget = await resolveForkTargetFromStoredMessages(sessionId, upToMessageUuid)
-    effectiveUpToMessageUuid = forkTarget.effectiveUpToMessageUuid
-
-    if (forkTarget.usedSidechainFallback) {
-      console.log(
-        `[Agent 会话] fork 目标消息 ${upToMessageUuid} 属于 sub-agent，自动回溯到主线消息 ${effectiveUpToMessageUuid}`,
-      )
-    }
-
-    if (forkTarget.effectiveSdkSessionId && forkTarget.effectiveSdkSessionId !== sourceMeta.sdkSessionId) {
-      console.log(
-        `[Agent 会话] fork 目标消息属于旧 SDK session ${forkTarget.effectiveSdkSessionId}（当前为 ${sourceMeta.sdkSessionId}），使用消息所属 session 进行 fork`,
-      )
-      forkSourceSdkSessionId = forkTarget.effectiveSdkSessionId
-    }
-  }
-
-  // 3. 调用 SDK 原生 forkSession
-  // process.env.CLAUDE_CONFIG_DIR 已在模块加载时设置，SDK 会自动读取
-  const sdk = await import('@anthropic-ai/claude-agent-sdk')
-  let forkResult: Awaited<ReturnType<typeof sdk.forkSession>>
-  try {
-    forkResult = await sdk.forkSession(forkSourceSdkSessionId, {
-      upToMessageId: effectiveUpToMessageUuid,
-      dir: sourceDir,
-    })
-  } catch (err) {
-    // 指定 dir 失败时，让 SDK 自动搜索所有项目目录
-    if (sourceDir) {
-      console.warn(`[Agent 会话] forkSession 指定 dir 失败，改用全局搜索:`, err)
-      forkResult = await sdk.forkSession(forkSourceSdkSessionId, {
-        upToMessageId: effectiveUpToMessageUuid,
-      })
-    } else {
-      throw err
-    }
-  }
-
-  // 4. 创建 MyYoda 新会话，立即设置 sdkSessionId
-  const forkTitle = `${sourceMeta.title} (fork)`
-  const newMeta = createAgentSession(
-    forkTitle,
-    sourceMeta.channelId,
-    sourceMeta.workspaceId,
-    forkModelId,
-    'claude',
-  )
-
-  updateAgentSessionMeta(newMeta.id, {
-    sdkSessionId: forkResult.sessionId,
-    forkSourceDir: sourceDir,
-    forkSourceSdkSessionId: forkSourceSdkSessionId,
-    // fork 继承源会话的 projectId，让新会话出现在左侧「项目」分组；
-    // 同时固定 agentCwdMode='session'，保持 fork 独立沙箱目录语义
-    // （工作区文件已复制到 destDir、SDK JSONL 路径已改写为 destDir）。
-    ...(sourceMeta.projectId ? { projectId: sourceMeta.projectId } : {}),
-    agentCwdMode: 'session',
-  })
-  // 同步返回值（updateAgentSessionMeta 已写入磁盘，这里让调用方拿到最新值）
-  newMeta.sdkSessionId = forkResult.sessionId
-  newMeta.forkSourceDir = sourceDir
-  newMeta.forkSourceSdkSessionId = forkSourceSdkSessionId
-  if (sourceMeta.projectId) newMeta.projectId = sourceMeta.projectId
-  newMeta.agentCwdMode = 'session'
-
-  // 4.4 计算 fork 目标会话的 cwd（新会话目录），后续多个步骤需要用到
-  let destDir: string | undefined
-  if (sourceDir && sourceMeta.workspaceId) {
-    const ws = getAgentWorkspace(sourceMeta.workspaceId)
-    if (ws) {
-      destDir = getAgentSessionWorkspacePath(ws.slug, newMeta.id)
-    }
-  }
-
-  // 4.5 将 SDK session JSONL 复制到 fork 自己的 project-hash 目录
-  // SDK forkSession() 在源 cwd 的 project-hash 下创建 JSONL（如 projects/<hash-of-sourceDir>/<newId>.jsonl），
-  // 但 fork 会话的 cwd 是新的 session 目录（不同 project-hash），resume 时 SDK 会找不到。
-  // 这里直接将 JSONL 复制到 fork 目标 cwd 的 project-hash 下，让后续每轮 resume 都能直接命中。
-  // 同时把 JSONL 内容中所有源目录路径改写为目标目录路径，避免历史中的绝对路径误导 Claude
-  // 继续在源目录下读写文件。
-  if (sourceDir && destDir) {
-    const sourceJsonl = findSdkSessionJsonl(forkResult.sessionId)
-    if (sourceJsonl) {
-      // SDK 使用简单的字符替换计算 project-hash：path.replace(/[^a-zA-Z0-9]/g, '-')
-      const destProjectHash = destDir.replace(/[^a-zA-Z0-9]/g, '-')
-      const sdkProjectsDir = join(getSdkConfigDir(), 'projects', destProjectHash)
-      if (!existsSync(sdkProjectsDir)) mkdirSync(sdkProjectsDir, { recursive: true })
-      const destJsonl = join(sdkProjectsDir, `${forkResult.sessionId}.jsonl`)
-      try {
-        const copiedLines = await copyTextFileWithPathRewrite(sourceJsonl, destJsonl, sourceDir, destDir)
-        console.log(`[Agent 会话] 已将 SDK session JSONL 复制到 fork 目标目录并改写路径: ${destJsonl} (${copiedLines} 行)`)
-      } catch (err) {
-        console.warn(`[Agent 会话] 复制 SDK session JSONL 失败，fork 后首轮可能触发上下文回填:`, err)
-      }
-    } else {
-      console.warn(`[Agent 会话] 未找到 SDK session JSONL (${forkResult.sessionId})，fork 后首轮可能触发上下文回填`)
-    }
-  }
-
-  // 5. 复制源会话工作区文件到新会话目录
-  // 保留 .context/，但跳过依赖、构建产物和 Git 元数据，避免 fork 点击时同步复制巨量目录拖垮主进程。
-  // .context/ 必须保留 — MyYoda 约定 .context/note.md、todo.md、plan/ 等是会话上下文，
-  // 如果不复制，fork 后这些参考资料会丢失或被 Claude 误回源目录读取。
-  if (sourceDir && destDir) {
-    try {
-      const copyResult = copyForkWorkspaceFiles(sourceDir, destDir)
-      console.log(
-        `[Agent 会话] 已复制工作区文件: ${sourceDir} → ${destDir} `
-        + `(${copyResult.copiedCount} 个条目, 跳过 ${copyResult.skippedCount} 个, 失败 ${copyResult.failedCount} 个)`,
-      )
-    } catch (err) {
-      console.warn(`[Agent 会话] 复制工作区文件失败:`, err)
-    }
-  }
-
-  // 6. 复制截断后的 SDKMessages 到新会话的 JSONL（用于 UI 展示历史）
-  // 同时改写消息中所有源目录绝对路径为目标目录路径 — 否则 Claude 在历史里看到的所有
-  // Read/Edit/Bash 工具调用都指向源会话目录，会继续在源目录而非新 cwd 下操作文件。
-  //
-  // 注意：UI 截断点用原始 upToMessageUuid，保留用户实际看到的所有内容（包括 sub-agent
-  // 过程消息），与 SDK forkSession 用 effectiveUpToMessageUuid（主线 uuid）解耦。
-  const copiedMessages = await copyForkStoredSDKMessages({
-    sourceSessionId: sessionId,
-    destSessionId: newMeta.id,
-    upToMessageUuid,
-    sourceDir,
-    destDir,
-  })
-
-  console.log(`[Agent 会话] 分叉会话已创建（SDK 原生 fork）: ${sourceMeta.title} → ${forkTitle} (${copiedMessages} 条消息, sdkSessionId=${forkResult.sessionId})`)
-  return newMeta
+  // Claude runtime 已于 2026-08 退役，Pi-only：所有 fork 一律走 Pi SessionManager。
+  return forkPiAgentSession(sourceMeta, input)
 }
 
-/**
- * Pi 的 session 是 append-only tree。分叉必须由 SessionManager 导出目标 branch，
- * 不能只复制 Proma 的展示 JSONL，否则下一轮 resume 仍会看到被截断的上下文。
- */
 async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessionInput): Promise<AgentSessionMeta> {
   const targetUuid = input.upToMessageUuid
   if (!targetUuid) throw new Error('Pi 分叉需要指定一条已完成的 assistant 消息')
@@ -1092,19 +1077,24 @@ async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessi
   const forkModelId = input.modelId !== undefined
     ? assertEnabledModelForChannel({ channelId: sourceMeta.channelId, modelId: input.modelId, purpose: '分叉 Pi Agent 会话' })
     : sourceMeta.modelId
-  const sourceDir = sourceMeta.workspaceId
-    ? getAgentWorkspace(sourceMeta.workspaceId)
-      ? getAgentSessionWorkspacePath(getAgentWorkspace(sourceMeta.workspaceId)!.slug, sourceMeta.id)
-      : undefined
-    : undefined
-  const newMeta = createAgentSession(`${sourceMeta.title} (fork)`, sourceMeta.channelId, sourceMeta.workspaceId, forkModelId, 'pi')
+  const workspace = sourceMeta.workspaceId ? getAgentWorkspace(sourceMeta.workspaceId) : undefined
+  const sourceCwdMode = getAgentCwdMode(sourceMeta)
+  const sourceActiveWorktree = getActiveWorktreePath(sourceMeta) ? sourceMeta.activeWorktree : undefined
+  const sourceDir = resolveAgentCwd(workspace, sourceMeta.id, sourceCwdMode, sourceActiveWorktree)
+  const sourceWorkbenchDir = resolveAgentWorkbenchDir(workspace, sourceMeta.id)
+  const newMeta = createAgentSession(
+    `${sourceMeta.title} (fork)`,
+    sourceMeta.channelId,
+    sourceMeta.workspaceId,
+    forkModelId,
+    sourceCwdMode,
+  )
   const sourceThinking = getSessionThinkingLevel(sourceMeta)
   if (sourceThinking) {
     updateAgentSessionMeta(newMeta.id, sessionThinkingLevelPatch(sourceThinking))
   }
-  const destDir = sourceMeta.workspaceId && getAgentWorkspace(sourceMeta.workspaceId)
-    ? getAgentSessionWorkspacePath(getAgentWorkspace(sourceMeta.workspaceId)!.slug, newMeta.id)
-    : undefined
+  const destDir = resolveAgentCwd(workspace, newMeta.id, newMeta.agentCwdMode, sourceActiveWorktree)
+  const destWorkbenchDir = resolveAgentWorkbenchDir(workspace, newMeta.id)
 
   try {
     const sdk = await import('@earendil-works/pi-coding-agent')
@@ -1122,6 +1112,7 @@ async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessi
       sdkSessionId: forkedManager.getSessionId(),
       piSessionFile,
       piEntryBindings: { ...(sourceMeta.piEntryBindings ?? {}) },
+      activeWorktree: sourceActiveWorktree,
       forkSourceDir: sourceDir,
       // fork 继承源会话的 projectId，让新会话出现在左侧「项目」分组；
       // 同时固定 agentCwdMode='session'，保持 fork 独立沙箱目录语义。
@@ -1131,6 +1122,7 @@ async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessi
     newMeta.sdkSessionId = forkedManager.getSessionId()
     newMeta.piSessionFile = piSessionFile
     newMeta.piEntryBindings = { ...(sourceMeta.piEntryBindings ?? {}) }
+    newMeta.activeWorktree = sourceActiveWorktree
     if (sourceMeta.projectId) newMeta.projectId = sourceMeta.projectId
     newMeta.agentCwdMode = 'session'
 
@@ -1153,13 +1145,12 @@ async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessi
 /** 将当前 Pi 会话切换到指定 assistant turn 的新 branch artifact（持久化回退）。 */
 export async function rewindPiAgentSession(sessionId: string, assistantMessageUuid: string): Promise<void> {
   const meta = getAgentSessionMeta(sessionId)
-  if (!meta || meta.agentRuntime !== 'pi') throw new Error('不是 Pi Agent 会话')
+  if (!meta) throw new Error('会话不存在')
   const entryId = meta.piEntryBindings?.[assistantMessageUuid]
   if (!entryId) throw new Error('该 Pi 历史消息尚无 entry ID 映射，无法安全回退')
   if (!meta.piSessionFile || !existsSync(meta.piSessionFile)) throw new Error('未找到 Pi session artifact，无法安全回退')
-  const cwd = meta.workspaceId && getAgentWorkspace(meta.workspaceId)
-    ? getAgentSessionWorkspacePath(getAgentWorkspace(meta.workspaceId)!.slug, meta.id)
-    : process.cwd()
+  const workspace = meta.workspaceId ? getAgentWorkspace(meta.workspaceId) : undefined
+  const cwd = resolveAgentCwd(workspace, meta.id, meta.agentCwdMode, meta.activeWorktree) ?? process.cwd()
   const sdk = await import('@earendil-works/pi-coding-agent')
   const manager = sdk.SessionManager.open(meta.piSessionFile, join(getSdkConfigDir(), 'sessions'), cwd)
   const branchFile = manager.createBranchedSession(entryId)
@@ -1819,6 +1810,40 @@ export function rewindFilesFromSnapshot(
   } catch (err) {
     return { canRewind: false, error: err instanceof Error ? err.message : String(err) }
   }
+}
+
+/**
+ * Persist successful Skill loading on the human input that Pi actually consumed.
+ * This is intentionally a targeted JSONL rewrite: native Pi queues can produce
+ * several logical user turns before a single terminal result arrives.
+ */
+export function updateSDKUserMessageSkillActivations(
+  id: string,
+  userMessageUuid: string,
+  activations: SkillActivation[],
+): boolean {
+  if (activations.length === 0) return false
+  const filePath = getAgentSessionMessagesPath(id)
+  if (!existsSync(filePath)) return false
+
+  const raw = readFileSync(filePath, 'utf-8')
+  const lines = raw.split('\n').filter((line) => line.trim())
+  const messages = parseJsonlStrict<unknown>(lines, `更新用户 Skill metadata (${id})`)
+    .map(normalizePersistedSDKMessage)
+  const targetIndex = messages.findIndex((message) => (
+    message.type === 'user'
+    && (message as SDKUserMessage).uuid === userMessageUuid
+  ))
+  if (targetIndex < 0) return false
+
+  const target = messages[targetIndex] as SDKUserMessage
+  const merged = mergeSkillActivations(target.skill_activations ?? [], activations)
+  if (JSON.stringify(merged) === JSON.stringify(target.skill_activations ?? [])) return true
+
+  messages[targetIndex] = { ...target, skill_activations: merged }
+  const content = messages.map((message) => JSON.stringify(message)).join('\n') + '\n'
+  writeTextFileAtomic(filePath, content)
+  return true
 }
 
 /**

@@ -8,8 +8,8 @@
 import { join, basename } from 'node:path'
 import { mkdirSync, existsSync, cpSync, rmSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { createRequire } from 'node:module'
 import { rmSyncWithRetry } from './fs-retry'
+import { resolveSafeAttachmentPath } from './attachment-path-policy'
 
 /**
  * 获取配置目录名称
@@ -131,7 +131,7 @@ export function getAttachmentsDir(): string {
  * @returns ~/.myyoda/attachments/{conversationId}/
  */
 export function getConversationAttachmentsDir(conversationId: string): string {
-  const dir = join(getAttachmentsDir(), conversationId)
+  const dir = resolveSafeAttachmentPath(getAttachmentsDir(), conversationId)
 
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true })
@@ -147,7 +147,7 @@ export function getConversationAttachmentsDir(conversationId: string): string {
  * @returns 完整路径 ~/.myyoda/attachments/{conversationId}/{uuid}.ext
  */
 export function resolveAttachmentPath(localPath: string): string {
-  return join(getAttachmentsDir(), localPath)
+  return resolveSafeAttachmentPath(getAttachmentsDir(), localPath)
 }
 
 /**
@@ -509,70 +509,6 @@ export function getBundledCliPath(): string | undefined {
 }
 
 /**
- * 解析已打包的真实官方 `claude` 二进制路径（`@anthropic-ai/claude-agent-sdk-{platform}-{arch}`）。
- *
- * 从 `agent-orchestrator.ts` 抽取而来：Agent（Code）模式的 SDK 执行与
- * `claude-oauth-service.ts` 的订阅登录都需要定位同一个二进制，抽到这里
- * 避免登录服务依赖体量巨大的 orchestrator 模块图。
- *
- * 0.2.113+ 起 SDK 改为按平台分发 native binary，通过 optionalDependencies 安装到
- * `@anthropic-ai/claude-agent-sdk-{platform}-{arch}` 子包，与主包 `@anthropic-ai/claude-agent-sdk`
- * 同级。binary 名 macOS/Linux 为 `claude`，Windows 为 `claude.exe`。
- *
- * SDK 作为 esbuild external 依赖，require.resolve 可在运行时解析主包入口路径，
- * 再沿父目录 `@anthropic-ai/` 找到同级的平台子包。
- *
- * 多种策略降级：createRequire → 全局 require → cwd/node_modules 手动查找。
- * 打包环境下：asar 内的路径需要转换为 asar.unpacked 路径。
- */
-export function resolveClaudeAgentBinaryPath(): string {
-  const { app } = require('electron')
-  const subpkg = `claude-agent-sdk-${process.platform}-${process.arch}`
-  const scopedSubpkg = `@anthropic-ai/${subpkg}`
-  const binaryName = process.platform === 'win32' ? 'claude.exe' : 'claude'
-  let binaryPath: string | null = null
-
-  try {
-    const cjsRequire = createRequire(__filename)
-    const sdkEntryPath = cjsRequire.resolve('@anthropic-ai/claude-agent-sdk')
-    const anthropicDir = join(sdkEntryPath, '..', '..')
-    binaryPath = join(anthropicDir, subpkg, binaryName)
-    if (!existsSync(binaryPath)) {
-      const subpkgPackagePath = cjsRequire.resolve(`${scopedSubpkg}/package.json`)
-      binaryPath = join(subpkgPackagePath, '..', binaryName)
-    }
-  } catch (e) {
-    console.warn('[配置路径] createRequire 解析 Claude 二进制路径失败:', e)
-  }
-
-  if (!binaryPath || !existsSync(binaryPath)) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const sdkEntryPath = require.resolve('@anthropic-ai/claude-agent-sdk')
-      const anthropicDir = join(sdkEntryPath, '..', '..')
-      binaryPath = join(anthropicDir, subpkg, binaryName)
-      if (!existsSync(binaryPath)) {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const subpkgPackagePath = require.resolve(`${scopedSubpkg}/package.json`)
-        binaryPath = join(subpkgPackagePath, '..', binaryName)
-      }
-    } catch (e) {
-      console.warn('[配置路径] require.resolve 解析 Claude 二进制路径失败:', e)
-    }
-  }
-
-  if (!binaryPath || !existsSync(binaryPath)) {
-    binaryPath = join(__dirname, '..', 'node_modules', '@anthropic-ai', subpkg, binaryName)
-  }
-
-  if (app.isPackaged && binaryPath.includes('.asar')) {
-    binaryPath = binaryPath.replace(/\.asar([/\\])/, '.asar.unpacked$1')
-  }
-
-  return binaryPath
-}
-
-/**
  * 从 SKILL.md 的 YAML frontmatter 中解析 version 字段
  *
  * 无 version 字段时返回 '0.0.0'（确保旧 Skill 会被更新）。
@@ -868,7 +804,10 @@ export function getExcalidrawDir(workspaceSlug: string): string {
  * 不根据 bundle 中缺失的目录自动删除，避免误删用户自行安装的 Skills；
  * 后续退役某个内置 Skill 时，显式把它的 slug 加到这里。
  */
-export const RETIRED_DEFAULT_SKILL_SLUGS: readonly string[] = []
+export const RETIRED_DEFAULT_SKILL_SLUGS: readonly string[] = [
+  // 已从 default-skills 移除：改为内置 MCP 安装检测引导（catalog.ts），不再需要独立 skill
+  'install-code-review-graph',
+]
 
 const RETIRED_DEFAULT_SKILL_SLUG_SET = new Set(RETIRED_DEFAULT_SKILL_SLUGS)
 

@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { normalizePathForCompare } from '@myyoda/shared/utils'
 import type { AgentSessionMeta } from '@myyoda/shared'
-import { listGitBranchesForSession, prepareSessionGitContext } from './git-session-context-service'
+import { assertWorktreeClean, listGitBranchesForSession, prepareSessionGitContext, removeSessionWorktree } from './git-session-context-service'
 
 const roots: string[] = []
 
@@ -22,8 +23,9 @@ function makeRepo(): string {
   sh(root, ['init', '-b', 'main'])
   sh(root, ['config', 'user.email', 'test@example.com'])
   sh(root, ['config', 'user.name', 'Test User'])
+  writeFileSync(join(root, '.gitignore'), '*.secret\n', 'utf-8')
   writeFileSync(join(root, 'README.md'), '# Test\n', 'utf-8')
-  sh(root, ['add', 'README.md'])
+  sh(root, ['add', '.gitignore', 'README.md'])
   sh(root, ['commit', '-m', 'initial'])
   sh(root, ['branch', 'feature/alpha'])
   return root
@@ -107,8 +109,10 @@ describe('git-session-context-service', () => {
     const repoRoot = sh(repo, ['rev-parse', '--show-toplevel'])
     const expectedWorktree = join(repoRoot, '.worktrees', 'session-one')
     expect(result.createdWorktree).toBe(true)
+    // git 输出的 repoRoot 是正斜杠（MSYS），实现存的是原始输入（Windows 反斜杠）——
+    // 用 normalizePathForCompare 归一化后比较，跨平台稳定
+    expect(normalizePathForCompare(result.context.repoPath)).toBe(normalizePathForCompare(repoRoot))
     expect(result.context).toMatchObject({
-      repoPath: repoRoot,
       branch: 'main',
       executionMode: 'worktree',
       workingDirectory: expectedWorktree,
@@ -117,14 +121,55 @@ describe('git-session-context-service', () => {
     })
     expect(existsSync(expectedWorktree)).toBe(true)
     expect(sh(expectedWorktree, ['branch', '--show-current'])).toBe('')
+    expect(normalizePathForCompare(updates.at(-1)?.gitRepoPath ?? '')).toBe(normalizePathForCompare(repoRoot))
     expect(updates.at(-1)).toMatchObject({
       workingDirectory: expectedWorktree,
-      gitRepoPath: repoRoot,
       gitBranch: 'main',
       gitExecutionMode: 'worktree',
       gitWorktreePath: expectedWorktree,
       gitBaseRef: 'main',
     })
+  })
+
+  test('Given a dirty Worktree When removing it Then blocks deletion and preserves the user changes', () => {
+    const repo = makeRepo()
+    const worktree = join(repo, '.worktrees', 'dirty')
+    sh(repo, ['worktree', 'add', worktree, 'feature/alpha'])
+    writeFileSync(join(worktree, 'uncommitted.txt'), 'keep me\n', 'utf-8')
+
+    expect(() => assertWorktreeClean(worktree)).toThrow('已阻止删除 Worktree')
+    expect(() => removeSessionWorktree(repo, worktree)).toThrow('已阻止删除 Worktree')
+    expect(existsSync(join(worktree, 'uncommitted.txt'))).toBe(true)
+    // git 输出正斜杠且可能是长路径名；realpathSync 在 CI 上可能返回 8.3 短名（RUNNER~1）——
+    // 只断言 porcelain 输出的 worktree 行以 .worktrees/<name> 结尾，避免路径名形态差异
+    const porcelain = sh(repo, ['worktree', 'list', '--porcelain'])
+    expect(porcelain.split('\n').some((l) => l.startsWith('worktree ') && l.endsWith('.worktrees/dirty'))).toBe(true)
+  })
+
+  test('Given an ignored user file in a Worktree When removing it Then blocks deletion and preserves the file', () => {
+    const repo = makeRepo()
+    const worktree = join(repo, '.worktrees', 'ignored')
+    sh(repo, ['worktree', 'add', worktree, 'feature/alpha'])
+    writeFileSync(join(worktree, 'credentials.secret'), 'keep me\n', 'utf-8')
+
+    expect(() => assertWorktreeClean(worktree)).toThrow('已阻止删除 Worktree')
+    expect(() => removeSessionWorktree(repo, worktree)).toThrow('已阻止删除 Worktree')
+    expect(existsSync(join(worktree, 'credentials.secret'))).toBe(true)
+    // git 输出正斜杠且可能是长路径名；realpathSync 在 CI 上可能返回 8.3 短名（RUNNER~1）——
+    // 只断言 porcelain 输出的 worktree 行以 .worktrees/<name> 结尾，避免路径名形态差异
+    const porcelain = sh(repo, ['worktree', 'list', '--porcelain'])
+    expect(porcelain.split('\n').some((l) => l.startsWith('worktree ') && l.endsWith('.worktrees/ignored'))).toBe(true)
+  })
+
+  test('Given a clean Worktree When removing it Then removes the Worktree registration and directory', () => {
+    const repo = makeRepo()
+    const worktree = join(repo, '.worktrees', 'clean')
+    sh(repo, ['worktree', 'add', worktree, 'feature/alpha'])
+
+    removeSessionWorktree(repo, worktree)
+
+    expect(existsSync(worktree)).toBe(false)
+    expect(sh(repo, ['worktree', 'list', '--porcelain'])).not.toContain(`worktree ${worktree}`)
   })
 
   test('Given Local mode with dirty working tree When switching branch Then refuses without changing session meta', () => {

@@ -1,9 +1,10 @@
 /**
  * useAgentSkillsData — Agent 技能视图的数据层
  *
- * 封装当前空间 Skills / MCP 的加载与增删改逻辑（IPC 调用），
- * 供「Agent 技能」全屏视图复用。所有写操作后会 bump
- * workspaceCapabilitiesVersionAtom，通知侧边栏等订阅方刷新。
+ * 封装当前工作区 Skills / MCP 的加载与增删改逻辑（IPC 调用），
+ * 供「Agent 技能」全屏视图复用。当前 Skills 页面挂载期间固定初始快照，
+ * 避免文件监听导致的重排和整页跳动；开关仅更新对应卡片的 enabled 字段。
+ * 离开后下次进入或切换工作区时再重新读取完整能力列表。
  */
 
 import * as React from 'react'
@@ -17,7 +18,7 @@ import {
 import type { BuiltinMcpServerSummary, SkillMeta, WorkspaceCapabilities, WorkspaceMcpConfig } from '@myyoda/shared'
 
 export interface AgentSkillsData {
-  /** 当前空间（未选中时为 null） */
+  /** 当前工作区（未选中时为 null） */
   workspaceSlug: string
   workspaceName: string
   hasWorkspace: boolean
@@ -41,7 +42,6 @@ export function useAgentSkillsData(): AgentSkillsData {
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const bumpCapabilitiesVersion = useSetAtom(workspaceCapabilitiesVersionAtom)
-  const capabilitiesVersion = useAtomValue(workspaceCapabilitiesVersionAtom)
 
   const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId)
   const workspaceSlug = currentWorkspace?.slug ?? ''
@@ -79,28 +79,28 @@ export function useAgentSkillsData(): AgentSkillsData {
       setCapabilities(capabilities)
       setBuiltinMcpServers(capabilities.builtinMcpServers)
     } catch (error) {
-      console.error('[Agent 技能] 加载空间配置失败:', error)
+      console.error('[Agent 技能] 加载工作区配置失败:', error)
     } finally {
       setLoading(false)
     }
   }, [workspaceSlug])
 
-  // workspaceSlug 或外部能力版本变化时重新拉取
+  // 只在进入页面或切换工作区时读取。文件监听会在切换开关后异步推送能力变化，
+  // 这里刻意不订阅 capabilitiesVersion，防止扫描 active/inactive 目录后重排当前列表。
   React.useEffect(() => {
     setLoading(true)
     void loadData()
-  }, [loadData, capabilitiesVersion])
+  }, [loadData])
 
   const toggleSkill = React.useCallback(async (slug: string, enabled: boolean) => {
     try {
       await window.electronAPI.toggleWorkspaceSkill(workspaceSlug, slug, enabled)
       setSkills((prev) => prev.map((s) => (s.slug === slug ? { ...s, enabled } : s)))
-      bumpCapabilitiesVersion((v) => v + 1)
     } catch (error) {
       console.error('[Agent 技能] 切换 Skill 状态失败:', error)
       toast.error('切换 Skill 状态失败')
     }
-  }, [workspaceSlug, bumpCapabilitiesVersion])
+  }, [workspaceSlug])
 
   const deleteSkill = React.useCallback(async (slug: string, name: string): Promise<boolean> => {
     try {

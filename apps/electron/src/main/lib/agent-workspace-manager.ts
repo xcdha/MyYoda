@@ -32,6 +32,7 @@ import { RESERVED_BUILTIN_KEYS } from './builtin-mcp/baseline'
 import { inferMcpTransportType, normalizeMcpTransportType } from '@myyoda/shared'
 import type { AgentWorkspace, WorkspaceMcpConfig, SkillMeta, SkillImportSource, OtherWorkspaceSkillsGroup, WorkspaceCapabilities, SkillFileNode, SkillFileContent, WorkspaceMemorySummary, BulkImportSkillItemResult, BulkImportSkillsResult, BulkImportWorkspaceSelection, OrganizationConnection, OrganizationSkill } from '@myyoda/shared'
 import { extractSkillZip, orgDownloadSkill, buildOrganizationImportSource } from './org-skill-service'
+import { assertRecoveryRootSafe, assertRecoveryTargetSafe, quarantineForRecovery } from './recovery-trash-service'
 
 interface AgentWorkspacesIndex {
   version: number
@@ -222,7 +223,7 @@ export function createAgentWorkspace(name: string): AgentWorkspace {
 
   const duplicate = index.workspaces.find((w) => w.name === name)
   if (duplicate) {
-    throw new Error(`空间名称「${name}」已存在`)
+    throw new Error(`工作区名称「${name}」已存在`)
   }
 
   const existingSlugs = new Set(index.workspaces.map((w) => w.slug))
@@ -253,7 +254,7 @@ export function createAgentWorkspace(name: string): AgentWorkspace {
       }
     }
     console.error(`[Agent 工作区] 创建工作区失败 (${name}, slug: ${slug}):`, error)
-    throw new Error(`创建空间失败: ${(error as Error)?.message ?? '初始化空间目录失败'}`)
+    throw new Error(`创建工作区失败: ${(error as Error)?.message ?? '初始化工作区目录失败'}`)
   }
 
   index.workspaces.unshift(workspace)
@@ -272,14 +273,14 @@ export function updateAgentWorkspace(
   const idx = index.workspaces.findIndex((w) => w.id === id)
 
   if (idx === -1) {
-    throw new Error(`Agent 空间不存在: ${id}`)
+    throw new Error(`Agent 工作区不存在: ${id}`)
   }
 
   const existing = index.workspaces[idx]!
 
   const duplicate = index.workspaces.find((w) => w.id !== id && w.name === updates.name)
   if (duplicate) {
-    throw new Error(`空间名称「${updates.name}」已存在`)
+    throw new Error(`工作区名称「${updates.name}」已存在`)
   }
 
   const updated: AgentWorkspace = {
@@ -295,43 +296,67 @@ export function updateAgentWorkspace(
   return updated
 }
 
+/** 只读预检查工作区删除路径，供 Workspace 级联在任何 Session 副作用前调用。 */
+export function assertAgentWorkspaceDeletionSafe(id: string): void {
+  const index = readIndex()
+  const target = index.workspaces.find((workspace) => workspace.id === id)
+  if (!target) throw new Error(`Agent 工作区不存在: ${id}`)
+  if (target.slug === 'default') throw new Error('默认工作区不能删除')
+  if (index.workspaces.length <= 1) throw new Error('至少需要保留一个工作区')
+
+  const workspacesRoot = resolve(getAgentWorkspacesDir())
+  const workspaceDir = resolve(join(workspacesRoot, target.slug))
+  const relativePath = relative(workspacesRoot, workspaceDir)
+  if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    throw new Error(`工作区目录路径异常，已跳过删除: ${workspaceDir}`)
+  }
+  assertRecoveryTargetSafe(workspacesRoot, workspaceDir)
+}
+
 /** 删除工作区索引条目及其本地目录 */
 export function deleteAgentWorkspace(id: string): void {
   const index = readIndex()
   const idx = index.workspaces.findIndex((w) => w.id === id)
 
   if (idx === -1) {
-    throw new Error(`Agent 空间不存在: ${id}`)
+    throw new Error(`Agent 工作区不存在: ${id}`)
   }
 
   const target = index.workspaces[idx]!
   if (target.slug === 'default') {
-    throw new Error('默认空间不能删除')
+    throw new Error('默认工作区不能删除')
   }
   if (index.workspaces.length <= 1) {
-    throw new Error('至少需要保留一个空间')
+    throw new Error('至少需要保留一个工作区')
   }
 
   const workspacesRoot = resolve(getAgentWorkspacesDir())
   const workspaceDir = resolve(join(workspacesRoot, target.slug))
   const relativePath = relative(workspacesRoot, workspaceDir)
   if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) {
-    throw new Error(`空间目录路径异常，已跳过删除: ${workspaceDir}`)
+    throw new Error(`工作区目录路径异常，已跳过删除: ${workspaceDir}`)
   }
+  assertRecoveryTargetSafe(workspacesRoot, workspaceDir)
 
-  // 先移除索引条目并落盘，再删目录：
-  // 即使随后 rmSync 失败，也只会残留一个无引用目录（无害，可被同 slug 重建覆盖），
-  // 而不会留下指向已删目录的孤儿索引条目导致 UI 状态不一致
+  // 先移除索引条目并落盘，再把目录移入同卷、带 journal 的恢复隔离区。
+  // 隔离失败时恢复索引并向调用方抛错，避免 Renderer 把部分删除误报为成功。
   const removed = index.workspaces.splice(idx, 1)[0]!
   writeIndex(index)
 
-  if (existsSync(workspaceDir)) {
-    try {
-      rmSyncWithRetry(workspaceDir, { recursive: true, force: true })
-      console.log(`[Agent 工作区] 已删除工作区目录: ${workspaceDir}`)
-    } catch (error) {
-      console.warn(`[Agent 工作区] 删除工作区目录失败，已残留无引用目录 (${target.slug}):`, error)
+  try {
+    if (existsSync(workspaceDir)) {
+      quarantineForRecovery(workspacesRoot, workspaceDir, 'workspace', target.slug)
+      console.log(`[Agent 工作区] 已移入恢复隔离区: ${workspaceDir}`)
     }
+  } catch (error) {
+    try {
+      const current = readIndex()
+      current.workspaces.splice(idx, 0, removed)
+      writeIndex(current)
+    } catch (restoreError) {
+      console.error(`[Agent 工作区] 删除失败后恢复工作区索引失败 (${target.slug}):`, restoreError)
+    }
+    throw error
   }
 
   console.log(`[Agent 工作区] 已删除工作区: ${removed.name} (slug: ${removed.slug})`)
@@ -346,14 +371,14 @@ export function ensureDefaultWorkspace(): AgentWorkspace {
     const now = Date.now()
     defaultWs = {
       id: randomUUID(),
-      name: '默认空间',
+      name: '默认工作区',
       slug: 'default',
       createdAt: now,
       updatedAt: now,
     }
 
     getAgentWorkspacePath('default')
-    ensurePluginManifest('default', '默认空间')
+    ensurePluginManifest('default', '默认工作区')
     copyDefaultSkills('default')
 
     index.workspaces.push(defaultWs)
@@ -361,9 +386,17 @@ export function ensureDefaultWorkspace(): AgentWorkspace {
 
     console.log('[Agent 工作区] 已创建默认工作区')
   } else {
-    // 英文旧名迁移为简体中文产品文案（用户已改名则保留）
-    if (defaultWs.name === 'Default Space') {
-      defaultWs = { ...defaultWs, name: '默认空间', updatedAt: Date.now() }
+    // 历史默认名迁移为当前产品文案（用户已改名则保留）。
+    // 旧安装可能已经有另一个用户创建的“默认工作区”；冲突时保留历史名称，
+    // 避免绕过 create/update 的唯一性守卫产生两个同名工作区。
+    const hasDefaultNameConflict = index.workspaces.some(
+      (workspace) => workspace.id !== defaultWs!.id && workspace.name === '默认工作区',
+    )
+    if (
+      (defaultWs.name === 'Default Space' || defaultWs.name === '默认空间')
+      && !hasDefaultNameConflict
+    ) {
+      defaultWs = { ...defaultWs, name: '默认工作区', updatedAt: Date.now() }
       const idx = index.workspaces.findIndex((item) => item.id === defaultWs!.id)
       if (idx >= 0) index.workspaces[idx] = defaultWs
       writeIndex(index)
@@ -521,6 +554,22 @@ const SKILL_COPY_BLOCKLIST = new Set([
   '.turbo',
   '__pycache__',
 ])
+
+/**
+ * 跟随「编码优化模式」总开关（AppSettings.optimizedCoding）的预置 Skill。
+ * 预置（复制到工作区 skills/ 目录）但默认对 Agent 不可见；
+ * 总开关开启后由 orchestrator 的 skillsOverride 放行。
+ */
+export const OPTIMIZED_CODING_GATED_SKILLS: readonly string[] = [
+  'code-review',
+  'ultraqa',
+  'deep-interview',
+  'ai-slop-cleaner',
+]
+
+export function isOptimizedCodingGatedSkill(slug: string): boolean {
+  return OPTIMIZED_CODING_GATED_SKILLS.includes(slug)
+}
 
 export function skillCopyFilter(src: string): boolean {
   return !SKILL_COPY_BLOCKLIST.has(basename(src))
@@ -888,7 +937,7 @@ export async function importSkillFromWorkspace(
   const sourcePath = resolveSkillDir(sourceSlug, skillSlug)
 
   if (!sourcePath) {
-    throw new Error(`源空间中不存在 Skill: ${skillSlug}`)
+    throw new Error(`源工作区中不存在 Skill: ${skillSlug}`)
   }
 
   // P0 修复：复制前校验源 SKILL.md 存在，避免产生孤立目录
@@ -1000,20 +1049,20 @@ export function updateSkillFromSource(
       : null
 
   if (!targetPath) {
-    throw new Error(`当前空间中不存在 Skill: ${skillSlug}`)
+    throw new Error(`当前工作区中不存在 Skill: ${skillSlug}`)
   }
 
   const existingSource = readSkillImportSource(targetPath)
   if (!existingSource) {
-    throw new Error(`Skill ${skillSlug} 不是从其他空间导入的，无法从源更新`)
+    throw new Error(`Skill ${skillSlug} 不是从其他工作区导入的，无法从来源更新`)
   }
   if (!existingSource.sourceWorkspaceSlug) {
-    throw new Error(`Skill ${skillSlug} 不是从其他空间导入的，无法从源更新`)
+    throw new Error(`Skill ${skillSlug} 不是从其他工作区导入的，无法从来源更新`)
   }
 
   const sourcePath = resolveSkillDir(existingSource.sourceWorkspaceSlug, skillSlug)
   if (!sourcePath) {
-    throw new Error(`源空间中不再存在 Skill: ${skillSlug}（来源: ${existingSource.sourceWorkspaceName}）`)
+    throw new Error(`源工作区中不再存在 Skill: ${skillSlug}（来源: ${existingSource.sourceWorkspaceName}）`)
   }
 
   if (!existsSync(join(sourcePath, 'SKILL.md'))) {
@@ -2083,7 +2132,7 @@ export async function importSkillFromOrganization(
   const targetPath = join(getWorkspaceSkillsDir(targetSlug), skill.slug)
   const inactivePath = join(getInactiveSkillsDir(targetSlug), skill.slug)
   if (existsSync(targetPath) || existsSync(inactivePath)) {
-    throw new Error(`当前空间已存在同名 Skill: ${skill.slug}`)
+    throw new Error(`当前工作区已存在同名 Skill: ${skill.slug}`)
   }
   const zip = await orgDownloadSkill(conn, orgId, skill.slug)
   const files = await extractSkillZip(zip)
@@ -2129,7 +2178,7 @@ export async function updateSkillFromOrganizationSource(
       ? join(inactiveDir, skillSlug)
       : null
   if (!targetPath) {
-    throw new Error(`当前空间中不存在 Skill: ${skillSlug}`)
+    throw new Error(`当前工作区中不存在 Skill: ${skillSlug}`)
   }
   const existingSource = readSkillImportSource(targetPath)
   if (!existingSource || existingSource.sourceType !== 'organization') {

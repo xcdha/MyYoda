@@ -42,21 +42,8 @@ export function mockElectronModule(overrides: Record<string, unknown> = {}): voi
         isDestroyed: (): boolean => false,
         send: (): undefined => undefined,
       }
-      contentView = {
-        addChildView: (): undefined => undefined,
-        removeChildView: (): undefined => undefined,
-      }
       // agent-service 的 IPC 转发中间件会调用 getAllWindows 定位主窗口
       static getAllWindows(): unknown[] { return [] }
-    },
-    // 内嵌浏览器（synara 移植）：WebContentsView 宿主类，测试环境仅占位。
-    WebContentsView: class WebContentsView {
-      webContents = {
-        isDestroyed: (): boolean => false,
-        isAttached: (): boolean => false,
-        send: (): undefined => undefined,
-      }
-      setBounds(): void {}
     },
     clipboard: {
       writeText: () => undefined,
@@ -101,9 +88,25 @@ export function mockElectronModule(overrides: Record<string, unknown> = {}): voi
     },
     // 供 `import type { WebContents }` 等类型导入；运行时不会真正使用。
     WebContents: class WebContents {},
+    // browser-controller 以值导入 WebContentsView；测试中不真正创建视图。
+    WebContentsView: class WebContentsView {
+      webContents = { isDestroyed: () => false, send: () => undefined, loadURL: () => undefined }
+      setBounds(): void {}
+      setBackgroundColor(): void {}
+    },
+    // browser-controller 以值导入 session（浏览器分区/cookie 隔离）；测试中不真正使用。
+    session: {
+      fromPartition: () => ({
+        on: () => undefined,
+        setPermissionRequestHandler: () => undefined,
+        setPermissionCheckHandler: () => undefined,
+        webRequest: { onBeforeRequest: () => undefined, onHeadersReceived: () => undefined },
+        cookies: { get: () => [], set: () => undefined, remove: () => undefined },
+      }),
+      defaultSession: { on: () => undefined },
+    },
     webContents: {
       fromId: () => ({ send: () => undefined }),
-      getAllWebContents: () => [],
     },
     ...overrides,
   }))

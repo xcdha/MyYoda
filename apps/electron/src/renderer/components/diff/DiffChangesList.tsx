@@ -14,13 +14,14 @@ import {
   agentDiffUnseenFilesAtom,
   agentDiffDataAtom,
   agentSelectedWorktreeAtom,
+  agentSessionsAtom,
   workspaceGitDiffRefreshVersionAtom,
 } from '@/atoms/agent-atoms'
 import type { ChangedFileEntry, ChangedFileStatus, ChangeSource, UntrackedFileEntry, WorktreeInfo } from '@myyoda/shared'
 import { WorktreeSelector } from './WorktreeSelector'
-import { PullRequestStatusBar } from './PullRequestStatusBar'
 import { groupSessionFileChanges } from '@/lib/session-file-changes'
 import type { SessionFileChange } from '@/lib/session-file-changes'
+import { WORKSPACE_TERMS } from '@/lib/workspace-project-terminology'
 
 interface GitFileEntry {
   filePath: string
@@ -30,9 +31,6 @@ interface GitFileEntry {
   source?: ChangeSource
   gitRoot: string
 }
-
-/** agentSelectedWorktreeAtom 里的哨兵值：显式选了"会话改动"退出 sessionWorktreeContext 自动默认 */
-const SESSION_DIFF_SENTINEL = '__session_diff__'
 
 /** 按目录分组后的数据结构 */
 interface FileGroup {
@@ -53,8 +51,12 @@ interface DiffChangesListProps {
   sessionId: string
   /** 会话工作目录（用于 badge 计算） */
   sessionPath?: string
-  /** 空间共享文件目录（用于 badge 计算） */
+  /** 第二文件根（内部字段名为 workspace 以兼容既有 diff source contract）。 */
   workspaceFilesPath?: string
+  /** 第二文件根的展示标签；Project-bound 场景应传“项目文件”。 */
+  secondarySourceLabel?: string
+  /** 同时命中会话与第二文件根时的展示标签。 */
+  combinedSourceLabel?: string
   /** 点击文件回调 */
   onFileClick: (filePath: string, isUntracked: boolean, gitRoot?: string) => void
   /** 自动刷新信号（版本号递增触发） */
@@ -63,7 +65,7 @@ interface DiffChangesListProps {
   selectedFilePath?: string
   /** 额外的候选目录（附加目录等） */
   extraPaths?: string[]
-  /** 空间 slug，用于 WorktreeSelector 拉取 worktree 列表 */
+  /** 工作区 slug，用于 WorktreeSelector 拉取 worktree 列表 */
   workspaceSlug?: string
   /** 用于自动发现 worktree 的仓库候选路径 */
   worktreeRepoPaths?: string[]
@@ -72,25 +74,20 @@ interface DiffChangesListProps {
    * gitWorktreePath / gitBaseRef）。未手动通过 WorktreeSelector 选择其他 worktree 时，
    * 默认对比这个——否则 worktree 会话里已提交的改动，在"未提交改动"视角下完全不可见。
    */
-  sessionWorktreeContext?: { path: string; baseBranch: string }
   /** 本会话在非 Git 目录中成功写入的文件 */
   nonGitFileChanges?: SessionFileChange[]
   /** 当前 Agent run ID，用于将文件变更划分为本轮和更早 */
   currentFileChangeRunId?: string
   /** 点击非 Git 文件时打开纯文件预览 */
   onPlainFileClick?: (filePath: string) => void
-  /** 打开 PR 详情 Tab（repoPath + PR 编号） */
-  onOpenPullRequest?: (repoPath: string, number: number) => void
-  /** 创建 PR 成功后的回调 */
-  onPrCreated?: (result: { number: number; url: string; reusedExisting: boolean }) => void
 }
 
-/** 文件来源 badge 的颜色和文案 */
-const SOURCE_CONFIG: Record<string, { color: string; label: string }> = {
-  session: { color: 'bg-blue-500/10 text-blue-500', label: '会话文件' },
-  workspace: { color: 'bg-purple-500/10 text-purple-500', label: '空间' },
-  both: { color: 'bg-cyan-500/10 text-cyan-500', label: '会话+空间文件' },
-  none: { color: 'bg-muted text-muted-foreground', label: '附加目录文件' },
+/** 文件来源 badge 的颜色；文案按当前第二文件根的真实语义在组件内生成。 */
+const SOURCE_COLORS: Record<string, string> = {
+  session: 'bg-blue-500/10 text-blue-500',
+  workspace: 'bg-purple-500/10 text-purple-500',
+  both: 'bg-cyan-500/10 text-cyan-500',
+  none: 'bg-muted text-muted-foreground',
 }
 
 export const DiffChangesList = React.memo(function DiffChangesList({
@@ -98,50 +95,65 @@ export const DiffChangesList = React.memo(function DiffChangesList({
   sessionPath,
   sessionId,
   workspaceFilesPath,
+  secondarySourceLabel = WORKSPACE_TERMS.files,
+  combinedSourceLabel = `会话+${WORKSPACE_TERMS.files}`,
   onFileClick,
   refreshVersion,
   selectedFilePath,
   extraPaths,
   workspaceSlug,
   worktreeRepoPaths,
-  sessionWorktreeContext,
   nonGitFileChanges = [],
   currentFileChangeRunId,
   onPlainFileClick,
-  onOpenPullRequest,
-  onPrCreated,
 }: DiffChangesListProps): React.ReactElement {
-  // Worktree 选择状态（内联 WorktreeSelector）——手动选择优先；用户没有手动选过时，
-  // 若会话本身就绑定了 Worktree 执行上下文，默认用它（见 sessionWorktreeContext 注释）。
-  // SESSION_DIFF_SENTINEL 用来区分"从没手动选过"（undefined，跟随自动默认）和
-  // "手动点了『会话改动』要退回纯磁盘 diff"（显式选择，不应该被自动默认盖回去）。
+  // Worktree 选择状态：手动选择优先；未选择时回退到会话持久化的 activeWorktree。
+  const sourceConfig = React.useMemo<Record<string, { color: string; label: string }>>(() => ({
+    session: { color: SOURCE_COLORS.session!, label: '会话文件' },
+    workspace: { color: SOURCE_COLORS.workspace!, label: secondarySourceLabel },
+    both: { color: SOURCE_COLORS.both!, label: combinedSourceLabel },
+    none: { color: SOURCE_COLORS.none!, label: '附加目录文件' },
+  }), [combinedSourceLabel, secondarySourceLabel])
+
   const selectedWorktreeMap = useAtomValue(agentSelectedWorktreeAtom)
   const setSelectedWorktreeMap = useSetAtom(agentSelectedWorktreeAtom)
-  const rawSelectedWorktree = selectedWorktreeMap.get(sessionId)
-  const selectedWorktreePath = rawSelectedWorktree === SESSION_DIFF_SENTINEL
-    ? null
-    : rawSelectedWorktree ?? sessionWorktreeContext?.path ?? null
+  const sessions = useAtomValue(agentSessionsAtom)
+  const setSessions = useSetAtom(agentSessionsAtom)
+  const persistedWorktreePath = sessions.find((session) => session.id === sessionId)?.activeWorktree?.path ?? null
+  const selectedWorktreePath = selectedWorktreeMap.get(sessionId) ?? persistedWorktreePath
   const diffCacheKey = selectedWorktreePath ? `${sessionId}:worktree:${selectedWorktreePath}` : `${sessionId}:session`
-  const worktreeMode = React.useMemo(() => {
-    if (!selectedWorktreePath) return undefined
-    const baseBranch = selectedWorktreePath === sessionWorktreeContext?.path
-      ? sessionWorktreeContext.baseBranch
-      : 'origin/main'
-    return { path: selectedWorktreePath, baseBranch }
-  }, [selectedWorktreePath, sessionWorktreeContext])
-  const handleWorktreeSelect = React.useCallback((worktree: WorktreeInfo | null) => {
+  const worktreeMode = React.useMemo(
+    () => selectedWorktreePath ? { path: selectedWorktreePath, baseBranch: 'origin/main' } : undefined,
+    [selectedWorktreePath],
+  )
+
+  React.useEffect(() => {
     setSelectedWorktreeMap((prev) => {
-      const m = new Map(prev)
-      if (!worktree && sessionWorktreeContext) {
-        // 存在自动默认时，"会话改动"是一次显式退出选择，要用哨兵值记下来，
-        // 不能直接删 key（删了下次渲染又会被 sessionWorktreeContext 兜底盖回去）。
-        m.set(sessionId, SESSION_DIFF_SENTINEL)
-        return m
-      }
-      m.set(sessionId, worktree?.path ?? null)
-      return m
+      const previous = prev.get(sessionId) ?? null
+      if (previous === persistedWorktreePath) return prev
+      const next = new Map(prev)
+      next.set(sessionId, persistedWorktreePath)
+      return next
     })
-  }, [sessionId, setSelectedWorktreeMap, sessionWorktreeContext])
+  }, [persistedWorktreePath, sessionId, setSelectedWorktreeMap])
+
+  const handleWorktreeSelect = React.useCallback(async (worktree: WorktreeInfo | null) => {
+    try {
+      const updated = await window.electronAPI.setAgentSessionActiveWorktree({
+        sessionId,
+        worktreePath: worktree?.path ?? null,
+      })
+      setSessions((previous) => previous.map((session) => session.id === sessionId ? updated : session))
+      setSelectedWorktreeMap((prev) => {
+        const next = new Map(prev)
+        next.set(sessionId, updated.activeWorktree?.path ?? null)
+        return next
+      })
+    } catch (error) {
+      console.error('[DiffChangesList] 保存活动 worktree 失败:', error)
+      window.alert(`切换 worktree 失败：${error instanceof Error ? error.message : '未知错误'}`)
+    }
+  }, [sessionId, setSelectedWorktreeMap, setSessions])
 
   // Diff 数据缓存：mount 时若已有上次结果，立即用作初值，避免空数组闪 1s "没有代码改动"
   const diffDataMap = useAtomValue(agentDiffDataAtom)
@@ -247,8 +259,6 @@ export const DiffChangesList = React.memo(function DiffChangesList({
       ...untrackedFiles.map((file) => ({
         ...file,
         status: 'untracked' as const,
-        additions: 0,
-        deletions: 0,
       })),
     ]
     const filteredFiles = q
@@ -281,17 +291,6 @@ export const DiffChangesList = React.memo(function DiffChangesList({
   const shouldShowSearch = isGitRepo && (hasAnyChanges || searchQuery.length > 0)
   const shouldShowWorktreeSelector = isGitRepo && Boolean(workspaceSlug || (worktreeRepoPaths?.length ?? 0) > 0)
 
-  // PR 状态行使用的仓库根目录：优先用当前选中的 worktree / 会话 worktree，否则用第一个文件组的 gitRoot 或 dirPath
-  const prRepoPath = React.useMemo(() => {
-    if (selectedWorktreePath) return selectedWorktreePath
-    if (sessionWorktreeContext?.path) return sessionWorktreeContext.path
-    if (fileGroups.length > 0) return fileGroups[0]!.gitRoot || dirPath
-    return dirPath
-  }, [selectedWorktreePath, sessionWorktreeContext, fileGroups, dirPath])
-
-  // PR 状态行仅在 Git 仓库且面板可见时显示；refreshVersion 由父级在窗口聚焦时递增
-  const shouldShowPrStatusBar = isGitRepo && prRepoPath
-
   return (
     <div className="flex flex-col h-full overflow-y-auto">
       {/* Worktree 分支选择器仅作用于 Git 改动。 */}
@@ -302,16 +301,6 @@ export const DiffChangesList = React.memo(function DiffChangesList({
           repoPaths={worktreeRepoPaths}
           selectedPath={selectedWorktreePath}
           onSelect={handleWorktreeSelect}
-        />
-      )}
-
-      {/* PR 状态行 + 主操作按钮（仅 Git 仓库；刷新时机：挂载/手动/窗口聚焦，不做轮询） */}
-      {shouldShowPrStatusBar && (
-        <PullRequestStatusBar
-          repoPath={prRepoPath}
-          refreshVersion={refreshVersion}
-          onOpenPullRequest={onOpenPullRequest}
-          onPrCreated={onPrCreated}
         />
       )}
 
@@ -386,7 +375,7 @@ export const DiffChangesList = React.memo(function DiffChangesList({
                   <span className="truncate">{group.dirName}</span>
                   {/* 文件夹层级的来源 badges */}
                   {group.sources.map((src) => {
-                    const cfg = SOURCE_CONFIG[src] ?? SOURCE_CONFIG.none!
+                    const cfg = sourceConfig[src] ?? sourceConfig.none!
                     return (
                       <span key={src} className={cn('rounded px-1 py-0.5 text-[12px] leading-none shrink-0', cfg.color)}>
                         {cfg.label}
@@ -518,7 +507,7 @@ function NonGitFileList({
                 <button
                   type="button"
                   aria-label="在文件夹中显示"
-                  onClick={() => window.electronAPI.showInFolder(change.path, { sessionId, unrestricted: true }).catch(console.error)}
+                  onClick={() => window.electronAPI.showInFolder(change.path, { sessionId }).catch(console.error)}
                   className="mr-1 flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-foreground/[0.08] hover:text-foreground"
                 >
                   <FolderSearch className="size-3.5" />

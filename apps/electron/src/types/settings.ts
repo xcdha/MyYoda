@@ -431,6 +431,9 @@ export interface CodeClawSettings {
   soundEnabled?: boolean
 }
 
+/** 提升此版本可要求用户重新确认更新后的受管浏览器风险告知。 */
+export const BROWSER_RISK_DISCLAIMER_VERSION = 1
+
 /** 应用设置 */
 export interface AppSettings {
   /** 主题模式 */
@@ -487,6 +490,10 @@ export interface AppSettings {
   agentEffort?: AgentEffort
   /** 新会话默认思考深度（对齐 craft defaultThinkingLevel；会话内可覆盖） */
   defaultThinkingLevel?: AgentThinkingLevel
+  /** 编码优化模式（总开关）：开启后启用 PR37 的 DeepSeek 编码优化全家桶（repo map/B1 编码规范/D2 提前压缩/分工指引/新预置 skill）。默认关闭。 */
+  optimizedCoding?: boolean
+  /** Coding 模式（遗留字段，兼容读取：optimizedCoding 未设置时回退到此值） */
+  codingMode?: boolean
   /** Agent 最大预算（美元/次） */
   agentMaxBudgetUsd?: number
   /** Agent 最大轮次（0 或 undefined = SDK 默认） */
@@ -523,6 +530,8 @@ export interface AppSettings {
   feishuSessionMirror?: FeishuSessionMirrorSettings
   /** 无视觉输入能力 Agent 的视觉助手路由 */
   visionRelay?: VisionRelaySettings
+  /** 已确认的受管浏览器风险告知版本；低于当前版本时首次使用会再次要求确认。 */
+  browserRiskDisclaimerVersion?: number
   /** 用户手动关闭的 MyYoda 内置 MCP ID 列表（针对默认开启的内置 MCP） */
   builtinMcpDisabledIds?: string[]
   /** 用户手动开启的 MyYoda 内置 MCP ID 列表（针对默认关闭的内置 MCP，如 nano-banana、mem） */
