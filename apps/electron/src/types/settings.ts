@@ -365,6 +365,8 @@ export interface TypographySettings {
   lineHeight?: number
   /** 字距（px，默认 0，范围 -1~2） */
   letterSpacing?: number
+  /** 段距（px，默认 6，范围 0~24）——Markdown 段落之间的垂直间距 */
+  paragraphSpacing?: number
   /** 正文文字颜色（CSS 颜色值；空/undefined 表示跟随主题） */
   textColor?: string
 }
@@ -374,6 +376,7 @@ export const DEFAULT_TYPOGRAPHY_SETTINGS: TypographySettings = {
   fontSize: undefined,
   lineHeight: 1.65,
   letterSpacing: 0,
+  paragraphSpacing: 6,
   textColor: undefined,
 }
 

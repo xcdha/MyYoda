@@ -683,7 +683,7 @@ export const MessageResponse = React.memo(
       <div
         className={cn(
           'message-response prose dark:prose-invert max-w-none text-[length:var(--md-body-font-size)]',
-          'prose-p:my-1.5 prose-p:leading-[var(--md-body-line-height)] prose-li:leading-[var(--md-body-line-height)] prose-pre:my-0 prose-headings:my-3 prose-hr:my-4',
+          'prose-p:my-[var(--md-body-paragraph-spacing)] prose-p:leading-[var(--md-body-line-height)] prose-li:leading-[var(--md-body-line-height)] prose-pre:my-0 prose-headings:my-3 prose-hr:my-4',
           'prose-p:tracking-[var(--md-body-letter-spacing)] prose-li:tracking-[var(--md-body-letter-spacing)]',
           'prose-p:text-[color:var(--md-body-color)] prose-li:text-[color:var(--md-body-color)]',
           'prose-h1:text-[1.7em] prose-h1:leading-[1.15] prose-h1:tracking-[-0.025em]',

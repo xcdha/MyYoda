@@ -130,7 +130,7 @@ export function MarkdownRichEditor({
         class: cn(
           'prose prose-sm dark:prose-invert max-w-none min-h-full cursor-text focus:outline-none',
           'px-4 py-3 text-[length:var(--md-body-font-size)] leading-[var(--md-body-line-height)] tracking-[var(--md-body-letter-spacing)] text-[color:var(--md-body-color)]',
-          '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
+          'prose-p:my-[var(--md-body-paragraph-spacing)] prose-headings:my-3 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
           '[&_pre]:rounded-md [&_pre]:p-3',
           '[&_code]:bg-muted [&_code]:rounded [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[0.875em]',
           '[&_pre_code]:bg-transparent [&_pre_code]:p-0',

@@ -252,7 +252,7 @@ export function AppearanceSettings(): React.ReactElement {
           <div className="border-t border-border px-4 py-4 space-y-4">
             <div>
               <div className="text-xs font-medium text-foreground">正文排版</div>
-              <div className="mt-0.5 text-[11px] text-muted-foreground">精细调节 AI 回复与 Markdown 编辑器的字号、行距、字距与文字颜色（即时生效）</div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">精细调节 AI 回复与 Markdown 编辑器的字号、行距、字距、段距与文字颜色（即时生效）</div>
             </div>
 
             <TypographySlider
@@ -281,6 +281,15 @@ export function AppearanceSettings(): React.ReactElement {
               step={0.1}
               value={typography.letterSpacing ?? 0}
               onChange={async (v) => setTypography(await updateTypographySettings({ letterSpacing: v }))}
+            />
+            <TypographySlider
+              label="段距"
+              unit="px"
+              min={TYPOGRAPHY_LIMITS.paragraphSpacing.min}
+              max={TYPOGRAPHY_LIMITS.paragraphSpacing.max}
+              step={1}
+              value={typography.paragraphSpacing ?? 6}
+              onChange={async (v) => setTypography(await updateTypographySettings({ paragraphSpacing: v }))}
             />
 
             <div>
@@ -549,7 +558,8 @@ function StylePreview(): React.ReactElement {
             {/* 模拟 AI 回复（body 区域） */}
             <div className="max-w-[85%] rounded-xl rounded-tl-sm bg-muted/60 px-3 py-2 text-[length:var(--area-body-font-size)] leading-[var(--md-body-line-height)] tracking-[var(--md-body-letter-spacing)] text-[color:var(--md-body-color)]">
               <p className="text-[10px] text-muted-foreground">AI 回复</p>
-              <p>这是对话正文的实时预览，字号、行距、字距与颜色会随左侧设置即时变化。</p>
+              <p className="my-[var(--md-body-paragraph-spacing)]">这是对话正文的实时预览，字号、行距、字距、段距与颜色会随左侧设置即时变化。</p>
+              <p className="my-[var(--md-body-paragraph-spacing)]">调整"段距"滑块可以看到两个段落之间的距离实时改变。</p>
             </div>
             {/* 模拟代码块（code 区域） */}
             <div className="overflow-hidden rounded-lg border border-border/60">

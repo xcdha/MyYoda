@@ -1013,7 +1013,10 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
         }
         .ProseMirror p {
           font-style: normal;
-          margin: 0;
+          margin: 0 0 var(--md-body-paragraph-spacing);
+        }
+        .ProseMirror p:last-child {
+          margin-bottom: 0;
         }
         .ProseMirror ul,
         .ProseMirror ol {

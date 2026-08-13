@@ -19,11 +19,12 @@ import type { TypographySettings } from '../../types'
 /** 排版状态原子（渲染进程内存态，初始化时从主进程加载） */
 export const typographySettingsAtom = atom<TypographySettings>(DEFAULT_TYPOGRAPHY_SETTINGS)
 
-/** 各精细值的应用范围（px / 倍率 / px / 颜色值） */
+/** 各精细值的应用范围（px / 倍率 / px / px / 颜色值） */
 export const TYPOGRAPHY_LIMITS = {
   fontSize: { min: 12, max: 24 },
   lineHeight: { min: 1.2, max: 2.4 },
   letterSpacing: { min: -1, max: 2 },
+  paragraphSpacing: { min: 0, max: 24 },
 } as const
 
 /** 读取当前排版设置（含未显式设置字段的默认值合并） */
@@ -45,6 +46,11 @@ export function applyTypographyToDOM(settings: TypographySettings): void {
   }
   if (settings.letterSpacing != null) {
     root.setProperty('--md-body-letter-spacing', `${settings.letterSpacing}px`)
+  }
+  if (settings.paragraphSpacing != null) {
+    root.setProperty('--md-body-paragraph-spacing', `${settings.paragraphSpacing}px`)
+  } else {
+    root.removeProperty('--md-body-paragraph-spacing')
   }
   if (settings.textColor) {
     root.setProperty('--md-body-color', settings.textColor)
