@@ -13,7 +13,7 @@
 import { atom } from 'jotai'
 import type { TabType } from './tab-atoms'
 
-export type SettingsTab = 'general' | 'channels' | 'vision-relay' | 'proxy' | 'appearance' | 'about' | 'prompts' | 'tools' | 'bots' | 'tutorial' | 'faq' | 'shortcuts' | 'voice-input' | 'migration' | 'storage' | 'usage' | 'workspace' | 'organization'
+export type SettingsTab = 'general' | 'channels' | 'vision-relay' | 'proxy' | 'appearance' | 'about' | 'prompts' | 'tools' | 'bots' | 'tutorial' | 'faq' | 'shortcuts' | 'voice-input' | 'migration' | 'storage' | 'usage' | 'workspace' | 'organization' | 'feedback'
 export type ToolSettingsFocus = 'web-search' | 'nano-banana' | 'custom-tools'
 
 /** 当前设置标签页（不持久化，每次打开设置默认显示渠道） */
@@ -24,6 +24,12 @@ export const toolSettingsFocusAtom = atom<ToolSettingsFocus | null>(null)
 
 /** 设置浮窗是否打开 */
 export const settingsOpenAtom = atom(false)
+
+/**
+ * 代码图谱工具开关（repoMapTools）的运行时镜像（不持久化，持久化走 updateSettings）。
+ * 设置页与会话页共用，实现同一窗口内开关切换的即时联动（2026-08-14）。
+ */
+export const repoMapToolsAtom = atom(false)
 
 /** 渠道创建表单是否有未保存内容（用于拦截导航离开） */
 export const channelFormDirtyAtom = atom(false)

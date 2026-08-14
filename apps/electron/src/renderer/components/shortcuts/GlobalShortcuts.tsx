@@ -13,7 +13,6 @@ import { useEffect, useCallback } from 'react'
 import { useAtomValue, useSetAtom, useAtom, useStore } from 'jotai'
 import { appModeAtom } from '@/atoms/app-mode'
 import { settingsOpenAtom, channelFormDirtyAtom, settingsCloseRequestedAtom } from '@/atoms/settings-tab'
-import { searchDialogOpenAtom } from '@/atoms/search-atoms'
 import {
   tabsAtom,
   activeTabIdAtom,
@@ -48,6 +47,7 @@ import {
   projectContextBrowseRequestAtom,
 } from '@/atoms/project-context-picker'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
+import { searchDialogOpenAtom } from '@/atoms/search-dialog'
 import { useCreateSession } from '@/hooks/useCreateSession'
 import { useShortcut } from '@/hooks/useShortcut'
 import { useCloseTab } from '@/hooks/useCloseTab'
@@ -79,7 +79,9 @@ export function GlobalShortcuts(): null {
   const [settingsOpen, setSettingsOpen] = useAtom(settingsOpenAtom)
   const channelFormDirty = useAtomValue(channelFormDirtyAtom)
   const setSettingsCloseRequested = useSetAtom(settingsCloseRequestedAtom)
-  const [searchOpen, setSearchOpen] = useAtom(searchDialogOpenAtom)
+  const [activeView, setActiveView] = useAtom(activeViewAtom)
+  const searchDialogOpen = useAtomValue(searchDialogOpenAtom)
+  const setSearchDialogOpen = useSetAtom(searchDialogOpenAtom)
   const [sidebarCollapsed, setSidebarCollapsed] = useAtom(sidebarCollapsedAtom)
   const setShortcutOverrides = useSetAtom(shortcutOverridesAtom)
   const shortcutOverrides = useAtomValue(shortcutOverridesAtom)
@@ -136,14 +138,14 @@ export function GlobalShortcuts(): null {
       setSettingsOpen(false)
       return
     }
-    if (searchOpen) {
-      setSearchOpen(false)
+    if (searchDialogOpen) {
+      setSearchDialogOpen(false)
       return
     }
 
     if (!activeTabId) return
     requestClose(activeTabId)
-  }, [settingsOpen, setSettingsOpen, channelFormDirty, setSettingsCloseRequested, searchOpen, setSearchOpen, activeTabId, requestClose])
+  }, [settingsOpen, setSettingsOpen, channelFormDirty, setSettingsCloseRequested, searchDialogOpen, setSearchDialogOpen, activeTabId, requestClose])
 
   // 监听菜单 IPC 事件（Cmd+W 被 Electron 菜单拦截后通过 IPC 转发）
   useEffect(() => {
@@ -162,10 +164,19 @@ export function GlobalShortcuts(): null {
     useCallback(() => setSettingsOpen(true), [setSettingsOpen]),
   )
 
-  // Cmd+Shift+F / Ctrl+Shift+F → 全局搜索
+  // Cmd+Shift+F / Ctrl+Shift+F → 打开 Yoda 搜索弹窗
   useShortcut(
     'global-search',
-    useCallback(() => setSearchOpen(true), [setSearchOpen]),
+    useCallback(() => {
+      // 搜索弹窗已打开时再次触发则关闭
+      if (searchDialogOpen) {
+        setSearchDialogOpen(false)
+        return
+      }
+      // 设置面板打开时先关闭设置，再打开搜索
+      setSettingsOpen(false)
+      setSearchDialogOpen(true)
+    }, [searchDialogOpen, setSearchDialogOpen, setSettingsOpen]),
   )
 
   // Cmd+O → 在项目选择器上下文中浏览文件夹

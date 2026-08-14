@@ -39,10 +39,13 @@ import { AgentBrowserLinkProvider } from '@/components/browser/AgentBrowserLinkP
 import { parseThinkTagsFromText } from './thinking-tag-parser'
 import { AgentHistorySelectionLayer } from './AgentHistorySelectionLayer'
 import { TaskProgressOverlay, type ContextCompactionProgress } from './TaskProgressOverlay'
+import { createMessageGroupRenderCache, groupMessagesForRendering } from './message-group-rendering'
 import type { AgentEventUsage, RetryAttempt, SDKMessage, SDKSystemMessage } from '@myyoda/shared'
 import { getSDKCompactStatus } from '@myyoda/shared'
-import type { AgentStreamState } from '@/atoms/agent-atoms'
+import { agentLiveMessagesAtomFamily, agentSessionStreamingStateAtomFamily, type AgentStreamState } from '@/atoms/agent-atoms'
 import type { AgentSessionFileRoots } from '@myyoda/shared'
+
+const EMPTY_SDK_MESSAGES: SDKMessage[] = []
 
 function stableStringify(value: unknown): string {
   if (value == null || typeof value !== 'object') return JSON.stringify(value) ?? String(value)
@@ -182,19 +185,21 @@ export function getContextCompactionProgress(
 interface AgentMessagesProps {
   sessionId: string
   /** 当前会话已绑定的 Project ID（空态问候语内联项目切换器用） */
-  projectId?: string
+  workspaceId?: string
   /** 用户在前端选择的模型 ID（用于显示渠道配置的 Model Name） */
   sessionModelId?: string
   /** 消息是否已完成首次加载 */
   messagesLoaded?: boolean
   /** Phase 4: 持久化的 SDKMessage（新格式） */
   persistedSDKMessages?: SDKMessage[]
-  streaming: boolean
-  streamState?: AgentStreamState
-  /** Phase 2: 实时 SDKMessage 列表（流式期间累积） */
-  liveMessages?: SDKMessage[]
   /** 当前会话 sandbox，用于历史兼容和会话文件解析 */
   sessionPath?: string | null
+  /** 是否还有未加载的更早历史记录。 */
+  hasEarlierMessages?: boolean
+  /** 正在向前读取更早历史记录。 */
+  loadingEarlierMessages?: boolean
+  /** 用户主动请求加载更早历史记录。 */
+  onLoadEarlierMessages?: () => void
   /** 主进程解析的实际执行目录与 Project/Outbox 文件根 */
   fileRoots?: AgentSessionFileRoots | null
   /** 附加目录列表（与 sessionPath 一并用作相对路径解析候选） */
@@ -209,16 +214,16 @@ interface AgentMessagesProps {
 }
 
 /** 空状态引导 — 使用 WelcomeEmptyState，绑定当前草稿会话以支持问候语内联切换项目 */
-function EmptyState({ sessionId, projectId }: { sessionId: string; projectId?: string }): React.ReactElement {
-  return <WelcomeEmptyState sessionId={sessionId} projectId={projectId} />
+function EmptyState({ sessionId, workspaceId }: { sessionId: string; workspaceId?: string }): React.ReactElement {
+  return <WelcomeEmptyState sessionId={sessionId} workspaceId={workspaceId} />
 }
 
-function AssistantLogo({ model }: { model?: string }): React.ReactElement {
+function AssistantLogo({ model, channelId }: { model?: string; channelId?: string }): React.ReactElement {
   const channels = useAtomValue(channelsAtom)
   if (model) {
     return (
       <img
-        src={getModelLogo(model, resolveModelProvider(model, channels))}
+        src={getModelLogo(model, resolveModelProvider(model, channels, channelId))}
         alt={model}
         className="size-[30px] rounded-[9px] object-cover"
       />
@@ -499,7 +504,11 @@ function AgentRunningIndicator({ startedAt }: { startedAt?: number }): React.Rea
   )
 }
 
-export const AgentMessages = React.memo(function AgentMessages({ sessionId, projectId, sessionModelId, messagesLoaded, persistedSDKMessages, streaming, streamState, liveMessages, sessionPath, fileRoots, attachedDirs, stoppedByUser, onRetry, onRetryInNewSession, onFork, onRewind, onCompact }: AgentMessagesProps): React.ReactElement {
+export const AgentMessages = React.memo(function AgentMessages({ sessionId, workspaceId, sessionModelId, messagesLoaded, persistedSDKMessages, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, sessionPath, fileRoots, attachedDirs, stoppedByUser, onRetry, onRetryInNewSession, onFork, onRewind, onCompact }: AgentMessagesProps): React.ReactElement {
+  // 高频 token/live message 状态在历史区内闭环，避免唤醒 AgentView 输入框和工具栏。
+  const streamState = useAtomValue(agentSessionStreamingStateAtomFamily(sessionId))
+  const liveMessages = useAtomValue(agentLiveMessagesAtomFamily(sessionId))
+  const streaming = streamState?.running ?? false
   const userProfile = useAtomValue(userProfileAtom)
   const setMinimapCache = useSetAtom(tabMinimapCacheAtom)
   const channels = useAtomValue(channelsAtom)
@@ -545,7 +554,10 @@ export const AgentMessages = React.memo(function AgentMessages({ sessionId, proj
   // 从 streamState 属性中计算派生值
   const streamingContent = streamState?.content ?? ''
   const streamingModelId = streamState?.model || sessionModelId
-  const agentStreamingModel = streamingModelId ? resolveModelDisplayName(streamingModelId, channels) : undefined
+  const streamingChannelId = streamState?.channelId
+  const agentStreamingModel = streamingModelId
+    ? resolveModelDisplayName(streamingModelId, channels, streamingChannelId)
+    : undefined
   const retrying = streamState?.retrying
   const startedAt = streamState?.startedAt
 
@@ -597,7 +609,7 @@ export const AgentMessages = React.memo(function AgentMessages({ sessionId, proj
 
   const transitioning = needsInstant || transitioningCooldown
 
-  // 合并持久化 + 实时 SDKMessage（供 ContentBlock 内查找工具结果）
+  // 合并持久化 + 实时 SDKMessage；历史 group 后续仅接收本 turn 消息，避免全历史依赖扩散。
   const allSDKMessages = React.useMemo(() => {
     const persisted = persistedSDKMessages ?? []
     const live = liveMessages ?? []
@@ -638,6 +650,14 @@ export const AgentMessages = React.memo(function AgentMessages({ sessionId, proj
     ]
   }, [persistedSDKMessages, liveMessages, streaming])
   const hasContent = allSDKMessages.length > 0
+  // 跨 turn task_notification 是历史 Task 卡片唯一需要追踪的外部元数据。
+  // 普通 token/live snapshot 不改变此签名，MessageGroupRenderer comparator 因而可忽略全消息数组新引用。
+  const taskNotificationSignature = React.useMemo(() => (
+    allSDKMessages
+      .filter((message) => message.type === 'system' && message.subtype === 'task_notification')
+      .map((message) => getSDKMessageStableKey(message))
+      .join('\u0000')
+  ), [allSDKMessages])
 
   // 仅扫描当前 live turn；不从持久化历史恢复任务，避免跨 turn 显示旧进度。
   const liveTaskActivities = React.useMemo(() => {
@@ -657,10 +677,19 @@ export const AgentMessages = React.memo(function AgentMessages({ sessionId, proj
   const suppressAgentRunning = streamState?.isCompacting
     || (streamState?.compactInFlight && contextCompaction != null)
 
-  // 统一分组：将持久化 + 实时消息合并后再分组，确保 system 消息（如压缩分割线）出现在正确位置
+  // 流式更新只重新分组当前 turn；已完成历史复用 group 引用，使 memoized renderer
+  // 跳过历史 Markdown/代码高亮/工具结果树。非流式刷新仍保持完整 groupIntoTurns 语义。
+  const messageGroupCacheRef = React.useRef(createMessageGroupRenderCache())
   const allGroups = React.useMemo(() => {
-    return groupIntoTurns(allSDKMessages, sessionModelId)
-  }, [allSDKMessages, sessionModelId])
+    const result = groupMessagesForRendering(
+      allSDKMessages,
+      sessionModelId,
+      streaming,
+      messageGroupCacheRef.current,
+    )
+    messageGroupCacheRef.current = result.cache
+    return result.groups
+  }, [allSDKMessages, sessionModelId, streaming])
 
   // 压缩过程由底部 Progress Overlay 独立承载，不占用对话历史、迷你地图或用户锚点。
   const visibleGroups = React.useMemo(
@@ -674,8 +703,9 @@ export const AgentMessages = React.memo(function AgentMessages({ sessionId, proj
       allGroups,
       liveMessages,
       streaming,
+      activeRunStartedAt: streamState?.startedAt,
     })
-  }, [allGroups, liveMessages, streaming])
+  }, [allGroups, liveMessages, streaming, streamState?.startedAt])
 
   // 迷你地图数据 — 直接使用统一的 allGroups（无需去重）
   const minimapItems: MinimapItem[] = React.useMemo(
@@ -687,6 +717,7 @@ export const AgentMessages = React.memo(function AgentMessages({ sessionId, proj
       preview: getGroupPreview(group),
       avatar: group.type === 'user' ? userProfile.avatar : undefined,
       model: group.type === 'assistant-turn' ? group.model : undefined,
+      channelId: group.type === 'assistant-turn' ? group.channelId : undefined,
     })),
     [visibleGroups, userProfile.avatar]
   )
@@ -729,9 +760,19 @@ export const AgentMessages = React.memo(function AgentMessages({ sessionId, proj
     sessionPath,
     fileRoots?.executionCwd,
     fileRoots?.projectRoot,
-    fileRoots?.sessionOutboxPath,
     ...(attachedDirs ?? []),
   ].filter((path): path is string => Boolean(path))))
+
+  // turn 在消息渲染时一次性标注到 DOM；历史划选只需读取锚点属性，绝不回扫全部消息。
+  const groupHistoryTurns = React.useMemo(() => {
+    let turn = 0
+    const turns = new Map<MessageGroup, number>()
+    for (const group of visibleGroups) {
+      if (group.type === 'user') turn += 1
+      turns.set(group, Math.max(turn, 1))
+    }
+    return turns
+  }, [visibleGroups])
 
   return (
     <BasePathsProvider basePaths={messageBasePaths}>
@@ -739,8 +780,21 @@ export const AgentMessages = React.memo(function AgentMessages({ sessionId, proj
       <Conversation resize={ready && !transitioning ? 'smooth' : 'instant'} className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 transition-opacity duration-base') : 'opacity-0'}>
         <ScrollPositionManager id={sessionId} ready={ready} />
         <ConversationContent>
+          {hasEarlierMessages && (
+            <div className="flex justify-center py-2">
+              <button
+                type="button"
+                onClick={onLoadEarlierMessages}
+                disabled={loadingEarlierMessages || !onLoadEarlierMessages}
+                className="titlebar-no-drag inline-flex items-center gap-1.5 rounded-full border border-foreground/10 bg-background/70 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/[0.04] hover:text-foreground disabled:cursor-wait disabled:opacity-60"
+              >
+                {loadingEarlierMessages && <Spinner size="sm" />}
+                {loadingEarlierMessages ? '正在加载更早消息…' : '加载更早消息'}
+              </button>
+            </div>
+          )}
           {!hasContent && !streaming ? (
-            <EmptyState sessionId={sessionId} projectId={projectId} />
+            <EmptyState sessionId={sessionId} workspaceId={workspaceId} />
           ) : (
             <>
               {/* 统一消息渲染（持久化 + 实时合并为一个列表，确保 system 消息位置正确） */}
@@ -756,13 +810,15 @@ export const AgentMessages = React.memo(function AgentMessages({ sessionId, proj
                 const renderer = (
                   <MessageGroupRenderer
                     group={group}
-                    allMessages={allSDKMessages}
+                    allMessages={group.type === 'assistant-turn' ? allSDKMessages : EMPTY_SDK_MESSAGES}
+                    externalMetadataSignature={group.type === 'assistant-turn' ? taskNotificationSignature : ''}
                     basePath={messageBasePath}
                     onFork={shouldDisableActions ? undefined : onFork}
                     onRewind={shouldDisableActions ? undefined : onRewind}
                     onRetry={shouldDisableActions ? undefined : onRetry}
                     onRetryInNewSession={shouldDisableActions ? undefined : onRetryInNewSession}
                     onCompact={shouldDisableActions ? undefined : onCompact}
+                    historyTurn={groupHistoryTurns.get(group)}
                     isStreaming={isLive || undefined}
                     stoppedByUser={isLastAssistantTurn || undefined}
                     sessionModelId={sessionModelId}
@@ -791,7 +847,7 @@ export const AgentMessages = React.memo(function AgentMessages({ sessionId, proj
                   <MessageHeader
                     model={agentStreamingModel}
                     time={formatMessageTime(Date.now())}
-                    logo={<AssistantLogo model={streamingModelId} />}
+                    logo={<AssistantLogo model={streamingModelId} channelId={streamingChannelId} />}
                   />
                   <MessageContent>
                     {retrying && <RetryingNotice retrying={retrying} />}

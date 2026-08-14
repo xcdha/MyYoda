@@ -53,6 +53,8 @@ interface SystemPromptContext {
   memoryGuidance?: import('./agent-workspace-manager').WorkspaceMemoryGuidance
   /** 记忆复查邀请机会（距上次更新超过内部节奏且有新会话） */
   memoryRefreshOpportunity?: { memoryUpdatedAt?: number; newestSessionAt: number; newerSessionCount: number }
+  /** Graphify 知识图谱工具是否就绪（repo map 注入联动） */
+  graphifyToolsReady?: boolean
 }
 
 function buildWorkspacePromptPaths(workspaceSlug: string, sessionId: string) {

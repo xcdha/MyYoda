@@ -47,6 +47,7 @@ import { refreshXaiOAuth } from './xai-oauth-service'
 import { refreshXaiOAuthCredentialsSerial, rememberXaiOAuthCredentials } from './xai-oauth-credentials'
 import { parseCodexPlanQuotaResponse } from './codex-plan-quota'
 import { getKimiApiBalanceUrl, parseKimiApiBalanceResponse } from './kimi-api-balance'
+import { getOpenRouterKeyUrl, parseOpenRouterKeyResponse } from './openrouter-balance'
 import { listCodexModels, listXaiModels } from './adapters/pi-model-registry'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
@@ -86,9 +87,12 @@ const XIAOMI_PRESET_MODELS: ChannelModel[] = [
 const QWEN_TOKEN_PLAN_PRESET_MODELS: ChannelModel[] = [
   { id: 'qwen3.8-max-preview', name: 'Qwen3.8 Max Preview', enabled: true },
   { id: 'qwen3.7-max', name: 'Qwen3.7 Max', enabled: true },
+  { id: 'qwen3.7-flash', name: 'Qwen3.7 Flash', enabled: true },
   { id: 'qwen3.6-flash', name: 'Qwen3.6 Flash', enabled: true },
 ]
 const ARK_CODING_PLAN_MODELS: ChannelModel[] = [
+  { id: 'doubao-seed-2.1-pro', name: 'Doubao Seed 2.1 Pro', enabled: true },
+  { id: 'doubao-seed-2.1-turbo', name: 'Doubao Seed 2.1 Turbo', enabled: true },
   { id: 'doubao-seed-2.0-code', name: 'Doubao Seed 2.0 Code', enabled: true },
   { id: 'doubao-seed-2.0-pro', name: 'Doubao Seed 2.0 Pro', enabled: true },
   { id: 'doubao-seed-2.0-lite', name: 'Doubao Seed 2.0 Lite', enabled: true },
@@ -1115,18 +1119,19 @@ async function queryKimiPlanQuota(apiKey: string, proxyUrl?: string): Promise<Ch
     const duration = item.window.duration
     const isFiveHourWindow = (duration === 5 && item.window.timeUnit === 'TIME_UNIT_HOUR')
       || (duration === 300 && item.window.timeUnit === 'TIME_UNIT_MINUTE')
+    const isMonthlyWindow = item.window.timeUnit === 'TIME_UNIT_MONTH'
     const unitLabel = item.window.timeUnit === 'TIME_UNIT_HOUR'
       ? '小时'
       : item.window.timeUnit === 'TIME_UNIT_MINUTE'
         ? '分钟'
         : item.window.timeUnit === 'TIME_UNIT_DAY'
           ? '天'
-          : item.window.timeUnit === 'TIME_UNIT_MONTH'
+          : isMonthlyWindow
             ? '月'
             : item.window.timeUnit
     windows.push({
-      type: isFiveHourWindow ? '5h' : 'custom',
-      label: isFiveHourWindow ? '每 5 小时' : `${duration} ${unitLabel}`,
+      type: isFiveHourWindow ? '5h' : isMonthlyWindow ? 'monthly' : 'custom',
+      label: isFiveHourWindow ? '每 5 小时' : isMonthlyWindow ? `${duration} 月` : `${duration} ${unitLabel}`,
       remainingPercent: remaining,
       usedPercent: used,
       ...planQuotaResetAt(item.detail.resetTime),
@@ -1315,6 +1320,37 @@ async function queryDeepSeekBalance(apiKey: string, baseUrl: string, proxyUrl?: 
     updatedAt: Date.now(),
     message: data.is_available === false ? 'DeepSeek 账户余额不可用' : undefined,
   }
+}
+
+async function queryOpenRouterBalance(apiKey: string, baseUrl: string, proxyUrl?: string): Promise<ChannelPlanQuotaResult> {
+  const fetchFn = getFetchFn(proxyUrl)
+  const requestUrl = getOpenRouterKeyUrl(baseUrl)
+
+  const response = await fetchFn(requestUrl, withTimeout({
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: 'application/json',
+      'User-Agent': getAppUserAgent(pkg.version),
+    },
+  }))
+  const responseText = await response.text()
+  if (!response.ok) {
+    return createUnsupportedPlanQuota('openrouter', `OpenRouter 余额查询失败: HTTP ${response.status}`)
+  }
+
+  let data: unknown
+  try {
+    data = JSON.parse(responseText)
+  } catch {
+    return createUnsupportedPlanQuota('openrouter', 'OpenRouter 余额响应格式错误')
+  }
+
+  const error = (data as { error?: { message?: string } } | null)?.error
+  if (error?.message) {
+    return createUnsupportedPlanQuota('openrouter', error.message)
+  }
+  return parseOpenRouterKeyResponse(data)
 }
 
 interface ZhipuQuotaLimitItem {
@@ -1522,7 +1558,7 @@ function parseZhipuQuotaData(
     const total = totalCount > 0 ? totalCount : remainingCount + usedCount
     const remainingPercent = total > 0 ? (remainingCount / total) * 100 : 0
     windows.push({
-      type: 'custom',
+      type: 'monthly',
       label: 'MCP 每月',
       remainingPercent: clampPercent(remainingPercent),
       usedPercent: clampPercent(100 - remainingPercent),
@@ -1623,6 +1659,9 @@ export async function getChannelPlanQuota(channelId: string): Promise<ChannelPla
     }
     if (provider === 'kimi-api') {
       return await queryKimiApiBalance(apiKey, channel.baseUrl, proxyUrl)
+    }
+    if (provider === 'openrouter') {
+      return await queryOpenRouterBalance(apiKey, channel.baseUrl, proxyUrl)
     }
     if (provider === 'kimi-coding' || channel.baseUrl.includes('api.kimi.com/coding')) {
       return await queryKimiPlanQuota(apiKey, proxyUrl)

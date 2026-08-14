@@ -366,18 +366,6 @@ export function resolveWorkspaceFilesDir(slug: string): string {
   return join(getConfigDir(), 'agent-workspaces', slug, 'workspace-files')
 }
 
-/** 获取并创建 Workspace 级会话 Outbox。 */
-export function getAgentSessionOutboxPath(workspaceSlug: string, sessionId: string): string {
-  const dir = join(getWorkspaceFilesDir(workspaceSlug), 'Outbox', sessionId)
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  return dir
-}
-
-/** 解析 Workspace 级会话 Outbox 路径，不创建目录。 */
-export function resolveAgentSessionOutboxPath(workspaceSlug: string, sessionId: string): string {
-  return join(resolveWorkspaceFilesDir(workspaceSlug), 'Outbox', sessionId)
-}
-
 /**
  * 解析 Agent 会话工作目录路径（只读，不创建目录）
  *
@@ -689,6 +677,24 @@ export function getFeishuConfigPath(): string {
 }
 
 /**
+ * 获取反馈配置（Notion）文件路径
+ *
+ * @returns ~/.myyoda/feedback.json
+ */
+export function getFeedbackConfigPath(): string {
+  return join(getConfigDir(), 'feedback.json')
+}
+
+/**
+ * 获取反馈草稿目录路径
+ *
+ * @returns ~/.myyoda/feedback-drafts
+ */
+export function getFeedbackDraftsDir(): string {
+  return join(getConfigDir(), 'feedback-drafts')
+}
+
+/**
  * 获取飞书聊天绑定持久化路径
  *
  * @returns ~/.myyoda/feishu-bindings.json
@@ -805,7 +811,8 @@ export function getExcalidrawDir(workspaceSlug: string): string {
  * 后续退役某个内置 Skill 时，显式把它的 slug 加到这里。
  */
 export const RETIRED_DEFAULT_SKILL_SLUGS: readonly string[] = [
-  // 已从 default-skills 移除：改为内置 MCP 安装检测引导（catalog.ts），不再需要独立 skill
+  // 已从 default-skills 移除：CRG 图谱已于 v0.9.2 退役，代码图谱改为 Graphify
+  // （设置区「Graphify 环境」一键安装 + 对话栏图谱按钮建图），不再需要独立 skill
   'install-code-review-graph',
 ]
 

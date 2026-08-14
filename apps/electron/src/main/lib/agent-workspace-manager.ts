@@ -6,7 +6,7 @@
  * - 工作区目录：~/.myyoda/agent-workspaces/{slug}/（Agent 的 cwd）
  */
 
-import { readFileSync, writeFileSync, existsSync, readdirSync, cpSync, mkdirSync, statSync, openSync, readSync, closeSync, realpathSync, lstatSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, readdirSync, cpSync, mkdirSync, statSync, openSync, readSync, closeSync, realpathSync, lstatSync, accessSync, constants } from 'node:fs'
 import { cp as cpAsync, readFile as readFileAsync, writeFile as writeFileAsync } from 'node:fs/promises'
 import type { Dirent } from 'node:fs'
 import { rmSyncWithRetry, renameIfDestinationAbsentWithRetry, renameWithRetry } from './fs-retry'
@@ -17,6 +17,7 @@ import {
   getAgentWorkspacesIndexPath,
   getAgentWorkspacesDir,
   getAgentWorkspacePath,
+  getWorkspaceFilesDir,
   getWorkspaceMcpPath,
   getWorkspaceSkillsDir,
   getInactiveSkillsDir,
@@ -30,7 +31,7 @@ import { projectRepository } from './project-repository'
 import { listBuiltinMcpServers } from './builtin-mcp/catalog'
 import { RESERVED_BUILTIN_KEYS } from './builtin-mcp/baseline'
 import { inferMcpTransportType, normalizeMcpTransportType } from '@myyoda/shared'
-import type { AgentWorkspace, WorkspaceMcpConfig, SkillMeta, SkillImportSource, OtherWorkspaceSkillsGroup, WorkspaceCapabilities, SkillFileNode, SkillFileContent, WorkspaceMemorySummary, BulkImportSkillItemResult, BulkImportSkillsResult, BulkImportWorkspaceSelection, OrganizationConnection, OrganizationSkill } from '@myyoda/shared'
+import type { AgentWorkspace, LocalProjectRootStatus, CreateAgentWorkspaceInput, KanbanColumnDef, WorkspaceMcpConfig, SkillMeta, SkillImportSource, OtherWorkspaceSkillsGroup, OtherProjectSkillsGroup, WorkspaceCapabilities, SkillFileNode, SkillFileContent, WorkspaceMemorySummary, BulkImportSkillItemResult, BulkImportSkillsResult, BulkImportWorkspaceSelection, BulkImportProjectSelection, OrganizationConnection, OrganizationSkill } from '@myyoda/shared'
 import { extractSkillZip, orgDownloadSkill, buildOrganizationImportSource } from './org-skill-service'
 import { assertRecoveryRootSafe, assertRecoveryTargetSafe, quarantineForRecovery } from './recovery-trash-service'
 
@@ -156,13 +157,51 @@ function slugify(name: string, existingSlugs: Set<string>): string {
 
 export function listAgentWorkspaces(): AgentWorkspace[] {
   const index = readIndex()
-  return index.workspaces.slice()
+  return index.workspaces.map(withProjectRootStatus)
 }
 
 /** 按 updatedAt 降序（桥接/飞书列表等与旧版内联 sort 一致；渲染进程仍用 listAgentWorkspaces） */
 export function listAgentWorkspacesByUpdatedAt(): AgentWorkspace[] {
   const index = readIndex()
-  return index.workspaces.slice().sort((a, b) => b.updatedAt - a.updatedAt)
+  return index.workspaces.map(withProjectRootStatus).sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
+/**
+ * 同步检查用户选择的本地项目根。该状态用于运行前硬阻断和工作区列表提示，
+ * 不依赖目录 watcher，避免把临时监听失败误报为项目根丢失。
+ * （对齐 upstream Proma：工作区 = 项目，projectRootPath 即用户工程目录）
+ */
+export function getLocalProjectRootStatus(projectRootPath: string | undefined): LocalProjectRootStatus | undefined {
+  if (!projectRootPath) return undefined
+  if (!existsSync(projectRootPath)) return 'missing'
+
+  try {
+    if (!statSync(projectRootPath).isDirectory()) return 'not_directory'
+    accessSync(projectRootPath, constants.R_OK | constants.W_OK | constants.X_OK)
+    return 'available'
+  } catch {
+    return 'unavailable'
+  }
+}
+
+/** 为 IPC/展示调用附加即时状态，绝不修改磁盘索引中的工作区记录。 */
+function withProjectRootStatus(workspace: AgentWorkspace): AgentWorkspace {
+  const projectRootStatus = getLocalProjectRootStatus(workspace.projectRootPath)
+  return projectRootStatus ? { ...workspace, projectRootStatus } : { ...workspace }
+}
+
+/** 按 slug 查找工作区（项目），供项目文件根解析使用。 */
+export function getAgentWorkspaceBySlug(slug: string): AgentWorkspace | undefined {
+  const index = readIndex()
+  return index.workspaces.find((w) => w.slug === slug)
+}
+
+/**
+ * 返回项目文件根。本地目录项目直接使用用户选择的目录；空白项目继续
+ * 使用 MyYoda 托管的 workspace-files/，以保持历史项目完全兼容。
+ */
+export function getProjectFilesPath(workspaceSlug: string): string {
+  return getAgentWorkspaceBySlug(workspaceSlug)?.projectRootPath ?? getWorkspaceFilesDir(workspaceSlug)
 }
 
 /** 按指定 ID 顺序重排工作区，未列出的追加到末尾 */
@@ -218,7 +257,46 @@ function copyDefaultSkills(workspaceSlug: string, options: { throwOnError?: bool
   }
 }
 
-export function createAgentWorkspace(name: string): AgentWorkspace {
+/**
+ * copyDefaultSkills 的异步版本：用 fs/promises.cp 走 libuv 线程池，不占用 Electron 主进程主线程。
+ * 仅供交互式创建入口后台补齐使用（default-skills 约 63MB/674 文件，同步 cpSync 实测 ~0.2-0.5s，
+ * 刚好撞上计划模块的 EventKit 对账窗口时会叠加成明显 UI 卡顿）。
+ * 失败仅记日志，不回滚工作区（工作区已提前写入索引并可能已被渲染层引用，无法因 Skills
+ * 补齐失败而整个删除），与同目录内 upgradeDefaultSkillsInWorkspaces 对失败的容忍策略一致。
+ */
+async function copyDefaultSkillsAsync(workspaceSlug: string): Promise<void> {
+  const defaultDir = getDefaultSkillsDir()
+  const targetDir = getWorkspaceSkillsDir(workspaceSlug)
+
+  let entries: Dirent[]
+  try {
+    entries = readdirSync(defaultDir, { withFileTypes: true })
+  } catch (err) {
+    console.error(`[Agent 工作区] 读取默认 Skills 模板失败 (${workspaceSlug}):`, err)
+    return
+  }
+  if (entries.length === 0) {
+    console.warn(`[Agent 工作区] 默认 Skills 模板为空，工作区 Skills 未初始化: ${workspaceSlug}`)
+    return
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() || isRetiredDefaultSkill(entry.name)) continue
+    const source = join(defaultDir, entry.name)
+    const target = join(targetDir, entry.name)
+    try {
+      await cpAsync(source, target, { recursive: true, filter: skillCopyFilter })
+    } catch (err) {
+      console.warn(`[Agent 工作区] 后台复制默认 Skill 失败 (${workspaceSlug}/${entry.name}):`, err)
+    }
+  }
+  console.log(`[Agent 工作区] 已在后台复制默认 Skills 到: ${workspaceSlug}`)
+}
+
+export function createAgentWorkspace(input: string | CreateAgentWorkspaceInput): AgentWorkspace {
+  const { name, projectRootPath, deferSkillsCopy } = typeof input === 'string'
+    ? { name: input, projectRootPath: undefined, deferSkillsCopy: false }
+    : input
   const index = readIndex()
 
   const duplicate = index.workspaces.find((w) => w.name === name)
@@ -229,11 +307,28 @@ export function createAgentWorkspace(name: string): AgentWorkspace {
   const existingSlugs = new Set(index.workspaces.map((w) => w.slug))
   const slug = slugify(name, existingSlugs)
   const now = Date.now()
+  let normalizedProjectRootPath: string | undefined
+
+  if (projectRootPath) {
+    try {
+      normalizedProjectRootPath = realpathSync(resolve(projectRootPath))
+      if (!statSync(normalizedProjectRootPath).isDirectory()) {
+        throw new Error('选择的路径不是文件夹')
+      }
+      if (getLocalProjectRootStatus(normalizedProjectRootPath) !== 'available') {
+        throw new Error('选择的文件夹不可访问')
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '无法访问选择的文件夹'
+      throw new Error(`项目文件夹无效: ${message}`)
+    }
+  }
 
   const workspace: AgentWorkspace = {
     id: randomUUID(),
     name,
     slug,
+    projectRootPath: normalizedProjectRootPath,
     createdAt: now,
     updatedAt: now,
   }
@@ -241,7 +336,7 @@ export function createAgentWorkspace(name: string): AgentWorkspace {
   try {
     getAgentWorkspacePath(slug)
     ensurePluginManifest(slug, name)
-    copyDefaultSkills(slug, { throwOnError: true })
+    if (!deferSkillsCopy) copyDefaultSkills(slug, { throwOnError: true })
   } catch (error) {
     const workspacesRoot = resolve(getAgentWorkspacesDir())
     const workspaceDir = resolve(join(workspacesRoot, slug))
@@ -260,14 +355,70 @@ export function createAgentWorkspace(name: string): AgentWorkspace {
   index.workspaces.unshift(workspace)
   writeIndex(index)
 
+  if (deferSkillsCopy) {
+    // 工作区已可用，默认 Skills 在后台补齐，不阻塞本次 IPC 返回。
+    void copyDefaultSkillsAsync(slug).catch((err) => {
+      console.error(`[Agent 工作区] 后台补齐默认 Skills 失败 (${slug}):`, err)
+    })
+  }
+
   console.log(`[Agent 工作区] 已创建工作区: ${name} (slug: ${slug})`)
   return workspace
+}
+
+/** 重新关联本地项目根目录（对齐 upstream Proma relinkAgentWorkspaceProjectRoot） */
+export function relinkAgentWorkspaceProjectRoot(id: string, projectRootPath: string): AgentWorkspace {
+  const index = readIndex()
+  const idx = index.workspaces.findIndex((workspace) => workspace.id === id)
+  if (idx === -1) throw new Error(`工作区不存在: ${id}`)
+
+  let normalizedProjectRootPath: string
+  try {
+    normalizedProjectRootPath = realpathSync(resolve(projectRootPath))
+    if (!statSync(normalizedProjectRootPath).isDirectory()) {
+      throw new Error('选择的路径不是文件夹')
+    }
+    if (getLocalProjectRootStatus(normalizedProjectRootPath) !== 'available') {
+      throw new Error('选择的文件夹不可访问')
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '无法访问选择的文件夹'
+    throw new Error(`项目文件夹无效: ${message}`)
+  }
+
+  const updated: AgentWorkspace = {
+    ...index.workspaces[idx]!,
+    projectRootPath: normalizedProjectRootPath,
+    updatedAt: Date.now(),
+  }
+  index.workspaces[idx] = updated
+  writeIndex(index)
+  console.log(`[Agent 工作区] 已重新关联项目根: ${updated.name} → ${normalizedProjectRootPath}`)
+  return withProjectRootStatus(updated)
+}
+
+/** 在本地项目原路径恢复一个空目录。仅允许路径确实缺失时执行。 */
+export function restoreAgentWorkspaceProjectRoot(id: string): AgentWorkspace {
+  const index = readIndex()
+  const idx = index.workspaces.findIndex((workspace) => workspace.id === id)
+  if (idx === -1) throw new Error(`工作区不存在: ${id}`)
+
+  const workspace = index.workspaces[idx]!
+  if (!workspace.projectRootPath) throw new Error('该工作区不是本地项目')
+  const status = getLocalProjectRootStatus(workspace.projectRootPath)
+  if (status !== 'missing') {
+    throw new Error('只能恢复已缺失的本地项目根目录')
+  }
+
+  mkdirSync(workspace.projectRootPath, { recursive: true })
+  console.log(`[Agent 工作区] 已在原路径恢复空项目根: ${workspace.projectRootPath}`)
+  return withProjectRootStatus(workspace)
 }
 
 /** 更新工作区名称（slug 和目录不变） */
 export function updateAgentWorkspace(
   id: string,
-  updates: { name: string },
+  updates: { name?: string; kanbanColumns?: KanbanColumnDef[] },
 ): AgentWorkspace {
   const index = readIndex()
   const idx = index.workspaces.findIndex((w) => w.id === id)
@@ -278,14 +429,17 @@ export function updateAgentWorkspace(
 
   const existing = index.workspaces[idx]!
 
-  const duplicate = index.workspaces.find((w) => w.id !== id && w.name === updates.name)
-  if (duplicate) {
-    throw new Error(`工作区名称「${updates.name}」已存在`)
+  if (updates.name !== undefined) {
+    const duplicate = index.workspaces.find((w) => w.id !== id && w.name === updates.name)
+    if (duplicate) {
+      throw new Error(`工作区名称「${updates.name}」已存在`)
+    }
   }
 
   const updated: AgentWorkspace = {
     ...existing,
-    name: updates.name,
+    ...(updates.name !== undefined ? { name: updates.name } : {}),
+    ...(updates.kanbanColumns !== undefined ? { kanbanColumns: updates.kanbanColumns } : {}),
     updatedAt: Date.now(),
   }
 
@@ -891,6 +1045,94 @@ export function getOtherWorkspaceSkills(currentSlug: string): OtherWorkspaceSkil
   return result
 }
 
+// ===== 项目级 Skills / MCP（嵌套 Project 可选覆盖工作区级，不影响上述工作区级函数的任何现有行为） =====
+
+/** 项目是否已配置自己的 Skills；用于 UI 判断切换器展示、运行时判断是否用项目级覆盖工作区级 */
+export function hasProjectSkills(workspaceSlug: string, projectId: string): boolean {
+  return projectRepository.hasProjectSkills(getAgentWorkspacePath(workspaceSlug), projectId)
+}
+
+/** 获取项目所有 Skills（含活跃和不活跃），用于 Yoda 插件切到该项目时的 Skills Tab */
+export function getProjectSkills(workspaceSlug: string, projectId: string): SkillMeta[] {
+  const workspaceRoot = getAgentWorkspacePath(workspaceSlug)
+  const activeDir = projectRepository.getProjectSkillsDirPath(workspaceRoot, projectId)
+  const inactiveDir = projectRepository.getProjectInactiveSkillsDirPath(workspaceRoot, projectId)
+  if (!activeDir || !inactiveDir) return []
+  return [...scanSkillsInDir(activeDir, true), ...scanSkillsInDir(inactiveDir, false)]
+}
+
+/**
+ * 获取项目 Skills 目录路径（仅解析，**不自动创建**）。
+ *
+ * 注意：不能用 ensureProjectSkillsDirAtRoot——本函数被 useAgentSkillsData 在仅“查看”项目 Skills
+ * 标签页时就会无条件调用，如果自动建目录会导致“仅仅点开某个本地目录绑定项目的 Skills 标签页”
+ * 就在用户真实代码仓库里静默创建空的 .context/skills/ 目录（与 readProjectMemory 只读不写的原则不一致）。
+ * 真正需要写入的操作（toggleProjectSkill/deleteProjectSkill 的目录移动）仍用 ensureProjectSkillsDirAtRoot。
+ */
+export function getProjectSkillsDir(workspaceSlug: string, projectId: string): string {
+  return projectRepository.getProjectSkillsDirPath(getAgentWorkspacePath(workspaceSlug), projectId) ?? ''
+}
+
+/** 删除项目 Skill（active 或 inactive 目录均可） */
+export function deleteProjectSkill(workspaceSlug: string, projectId: string, skillSlug: string): void {
+  const workspaceRoot = getAgentWorkspacePath(workspaceSlug)
+  const activeDir = projectRepository.ensureProjectSkillsDirAtRoot(workspaceRoot, projectId)
+  const inactiveDir = projectRepository.ensureProjectInactiveSkillsDirAtRoot(workspaceRoot, projectId)
+  const activePath = join(activeDir, skillSlug)
+  const inactivePath = join(inactiveDir, skillSlug)
+  const skillPath = existsSync(activePath) ? activePath : inactivePath
+
+  if (!existsSync(skillPath)) {
+    throw new Error(`Skill 不存在: ${skillSlug}`)
+  }
+
+  rmSyncWithRetry(skillPath, { recursive: true, force: true })
+  console.log(`[项目 Skills] 已删除: ${workspaceSlug}/${projectId}/${skillSlug}`)
+}
+
+/** 在项目 skills/ 与 skills-inactive/ 之间移动来切换启用/禁用 */
+export function toggleProjectSkill(workspaceSlug: string, projectId: string, skillSlug: string, enabled: boolean): void {
+  const workspaceRoot = getAgentWorkspacePath(workspaceSlug)
+  const activeDir = projectRepository.ensureProjectSkillsDirAtRoot(workspaceRoot, projectId)
+  const inactiveDir = projectRepository.ensureProjectInactiveSkillsDirAtRoot(workspaceRoot, projectId)
+
+  const srcDir = enabled ? inactiveDir : activeDir
+  const destDir = enabled ? activeDir : inactiveDir
+  const srcPath = join(srcDir, skillSlug)
+  const destPath = join(destDir, skillSlug)
+
+  if (!existsSync(srcPath)) {
+    throw new Error(`Skill 不存在: ${skillSlug}`)
+  }
+  if (existsSync(destPath)) {
+    throw new Error(`目标目录已存在同名 Skill: ${skillSlug}`)
+  }
+
+  renameWithRetry(srcPath, destPath)
+  console.log(`[项目 Skills] ${enabled ? '启用' : '禁用'}: ${workspaceSlug}/${projectId}/${skillSlug}`)
+}
+
+/** 项目是否已配置自己的 MCP 服务器；用于 UI 判断切换器展示、运行时判断是否用项目级覆盖工作区级 */
+export function hasProjectMcpServers(workspaceSlug: string, projectId: string): boolean {
+  return projectRepository.hasProjectMcpServers(getAgentWorkspacePath(workspaceSlug), projectId)
+}
+
+/** 获取项目级 MCP 配置（未配置时返回空 servers） */
+export function getProjectMcpConfig(workspaceSlug: string, projectId: string): WorkspaceMcpConfig {
+  const raw = projectRepository.getProjectMcpConfigRaw(getAgentWorkspacePath(workspaceSlug), projectId)
+  return normalizeWorkspaceMcpConfig(raw as Partial<WorkspaceMcpConfig>)
+}
+
+/** 保存项目级 MCP 配置 */
+export function saveProjectMcpConfig(workspaceSlug: string, projectId: string, config: WorkspaceMcpConfig): void {
+  projectRepository.saveProjectMcpConfigRaw(
+    getAgentWorkspacePath(workspaceSlug),
+    projectId,
+    normalizeWorkspaceMcpConfig(config),
+  )
+  console.log(`[项目 MCP] 已保存配置: ${workspaceSlug}/${projectId}`)
+}
+
 class SkillAlreadyExistsError extends Error {
   readonly code = 'SKILL_ALREADY_EXISTS' as const
 
@@ -1027,6 +1269,140 @@ function summarizeBulkImport(items: BulkImportSkillItemResult[]): BulkImportSkil
     else failed += 1
   }
   return { imported, skipped, failed, items }
+}
+
+// ===== 跨 Project 导入 Skill（对齐 Proma“跨工作区导入”的真实粒度：Proma 一个 workspace = 一个仓库，
+// 等价于这里的一个嵌套 Project，所以这里的“其他来源”限定在同一 MyYoda 工作区内，不跨 MyYoda 工作区） =====
+
+/**
+ * 获取当前 Project 之外、同工作区内可导入的 Skill 来源：工作区默认（跨项目共享）+ 其他嵌套 Project 自己的 Skills。
+ */
+export function getOtherProjectSkills(workspaceSlug: string, currentProjectId: string): OtherProjectSkillsGroup[] {
+  const result: OtherProjectSkillsGroup[] = []
+
+  const workspaceSkills = getAllWorkspaceSkills(workspaceSlug)
+  if (workspaceSkills.length > 0) {
+    result.push({ sourceKind: 'workspace', sourceLabel: '工作区默认（跨项目共享）', skills: workspaceSkills })
+  }
+
+  const workspaceRoot = getAgentWorkspacePath(workspaceSlug)
+  const projects = projectRepository.listProjectsAtRoot(workspaceRoot)
+  for (const project of projects) {
+    if (project.config.id === currentProjectId) continue
+    if (project.config.kind === 'home' || project.config.kind === 'ad-hoc') continue
+    const skills = getProjectSkills(workspaceSlug, project.config.id)
+    if (skills.length === 0) continue
+    result.push({ sourceKind: 'project', sourceProjectId: project.config.id, sourceLabel: project.config.name, skills })
+  }
+
+  return result
+}
+
+/** 解析跨 Project 导入的源 Skill 目录（工作区级或某个 Project 级），不存在返回 null */
+function resolveProjectImportSourceDir(
+  workspaceSlug: string,
+  source: { sourceKind: 'workspace' | 'project'; sourceProjectId?: string },
+  skillSlug: string,
+): string | null {
+  if (source.sourceKind === 'workspace') {
+    return resolveSkillDir(workspaceSlug, skillSlug)
+  }
+  if (!source.sourceProjectId) return null
+  const workspaceRoot = getAgentWorkspacePath(workspaceSlug)
+  const activeDir = projectRepository.getProjectSkillsDirPath(workspaceRoot, source.sourceProjectId)
+  const inactiveDir = projectRepository.getProjectInactiveSkillsDirPath(workspaceRoot, source.sourceProjectId)
+  if (activeDir && existsSync(join(activeDir, skillSlug))) return join(activeDir, skillSlug)
+  if (inactiveDir && existsSync(join(inactiveDir, skillSlug))) return join(inactiveDir, skillSlug)
+  return null
+}
+
+/**
+ * 从工作区默认或另一个嵌套 Project 导入单个 Skill 到目标 Project。
+ *
+ * 与 importSkillFromWorkspace 的关键差异：项目级 Skill 没有导入来源追踪体系（批次 2 已定的范围，
+ * useAgentSkillsData 删除过 canUpdateSkillSource 字段），复制时显式排除 .source.json，
+ * 避免把源头（尤其是工作区级 Skill 若本身是被导入的）的来源元数据带进项目里，触发本不该出现的
+ * “可更新”提示——项目级 Skill 的“更新”按钮在 useAgentSkillsData 里会被 toast 拦截，但带着一个
+ * 用户点了没反应的按钮体验很差，不如从源头不产生它。
+ */
+async function importSkillToProject(
+  workspaceSlug: string,
+  targetProjectId: string,
+  source: { sourceKind: 'workspace' | 'project'; sourceProjectId?: string },
+  skillSlug: string,
+): Promise<SkillMeta> {
+  const sourcePath = resolveProjectImportSourceDir(workspaceSlug, source, skillSlug)
+  if (!sourcePath) {
+    throw new Error(`源中不存在 Skill: ${skillSlug}`)
+  }
+
+  const sourceSkillMdPath = join(sourcePath, 'SKILL.md')
+  if (!existsSync(sourceSkillMdPath)) {
+    throw new Error(`源 Skill 缺少 SKILL.md: ${skillSlug}`)
+  }
+
+  const workspaceRoot = getAgentWorkspacePath(workspaceSlug)
+  const targetActiveDir = projectRepository.ensureProjectSkillsDirAtRoot(workspaceRoot, targetProjectId)
+  const targetInactiveDir = projectRepository.ensureProjectInactiveSkillsDirAtRoot(workspaceRoot, targetProjectId)
+  const targetPath = join(targetActiveDir, skillSlug)
+  const targetInactivePath = join(targetInactiveDir, skillSlug)
+
+  return withSkillImportLock(targetPath, async () => {
+    if (existsSync(targetPath) || existsSync(targetInactivePath)) {
+      throw new SkillAlreadyExistsError(skillSlug)
+    }
+
+    const tempPath = join(targetActiveDir, `.${skillSlug}.importing-${randomUUID()}`)
+    try {
+      await cpAsync(sourcePath, tempPath, {
+        recursive: true,
+        filter: (src) => basename(src) !== SOURCE_META_FILE,
+      })
+
+      const content = await readFileAsync(join(tempPath, 'SKILL.md'), 'utf-8')
+      const meta = parseSkillFrontmatter(content, skillSlug, true)
+
+      if (existsSync(targetInactivePath) || !renameIfDestinationAbsentWithRetry(tempPath, targetPath)) {
+        throw new SkillAlreadyExistsError(skillSlug)
+      }
+      const sourceLabel = source.sourceKind === 'workspace' ? '工作区默认' : source.sourceProjectId
+      console.log(`[项目 Skills] 已导入: ${workspaceSlug}/${targetProjectId}/${skillSlug}（来自 ${sourceLabel}）`)
+      return meta
+    } catch (error) {
+      if (existsSync(tempPath)) {
+        try {
+          rmSyncWithRetry(tempPath, { recursive: true, force: true })
+        } catch (cleanupError) {
+          console.warn(`[项目 Skills] 清理导入临时目录失败: ${tempPath}`, cleanupError)
+        }
+      }
+      throw error
+    }
+  })
+}
+
+/** 从工作区默认或其他嵌套 Project 批量导入多个 Skill 到目标 Project */
+export async function batchImportSkillsToProject(
+  workspaceSlug: string,
+  targetProjectId: string,
+  selections: BulkImportProjectSelection[],
+): Promise<BulkImportSkillsResult> {
+  const items: BulkImportSkillItemResult[] = []
+  for (const { sourceKind, sourceProjectId, skillSlug } of selections) {
+    try {
+      const imported = await importSkillToProject(workspaceSlug, targetProjectId, { sourceKind, sourceProjectId }, skillSlug)
+      items.push({ slug: skillSlug, name: imported.name, status: 'imported' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误'
+      items.push({
+        slug: skillSlug,
+        name: skillSlug,
+        status: error instanceof SkillAlreadyExistsError ? 'skipped' : 'failed',
+        reason: message,
+      })
+    }
+  }
+  return summarizeBulkImport(items)
 }
 
 /**

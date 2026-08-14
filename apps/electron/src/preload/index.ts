@@ -7,7 +7,7 @@
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { PROJECT_IPC_CHANNELS, TASK_IPC_CHANNELS, SESSION_COMMAND_CHANNEL, SESSION_GROUP_IPC_CHANNELS, TEAMBITION_IPC_CHANNELS, EXPERT_IPC_CHANNELS } from '@myyoda/shared/channels'
-import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, RELEASE_NOTES_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, CODECLAW_IPC_CHANNELS, PR_IPC_CHANNELS } from '@myyoda/shared'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, RELEASE_NOTES_IPC_CHANNELS, FEEDBACK_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, CODECLAW_IPC_CHANNELS, PR_IPC_CHANNELS } from '@myyoda/shared'
 import type { TaskAggregateSummary, TaskMetadataPatch, TaskWorkflow } from '@myyoda/shared/tasks'
 import type { StartTodoAgentInput, StartTodoAgentResult, TodoAgentSessionActivation, PlanningWorkspaceScope } from '@myyoda/shared'
 import { LABEL_IPC_CHANNELS } from '@myyoda/shared/channels'
@@ -252,6 +252,18 @@ interface TaskResults {
   spec: TaskSpec | null
   log: RunLogEntry[]
   runId: string
+  /** 实际执行目录（Run context 快照，可能不存在） */
+  effectiveCwd?: string
+  effectiveCwdSource?: 'task' | 'project' | 'workspace'
+}
+
+/** 任务运行目录解析结果（与主进程 TaskWorkingDirectoryResult 同构） */
+interface TaskWorkingDirectoryResult {
+  status: 'resolved' | 'blocked'
+  cwd?: string
+  source?: 'task' | 'project' | 'workspace'
+  reason?: string
+  attemptedPath?: string
 }
 
 /** 渲染进程项目 DTO：透传 ProjectConfig（含 workingDirectory）；不泄露 LoadedProject 运行时路径（folderPath 等）。 */
@@ -413,6 +425,21 @@ export interface ElectronAPI {
   /** 获取独立预览窗口数据 */
   getDetachedPreviewData: (previewId: string) => Promise<DetachedPreviewWindowData | null>
 
+  // ===== Pi 受管浏览器（主进程 WebContentsView） =====
+  openAgentBrowser: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState>
+  listAgentBrowserTabs: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState>
+  createAgentBrowserTab: (input: import('@myyoda/shared').BrowserCreateTabInput) => Promise<import('@myyoda/shared').BrowserViewState>
+  selectAgentBrowserTab: (input: import('@myyoda/shared').BrowserTabInput) => Promise<import('@myyoda/shared').BrowserViewState>
+  closeAgentBrowserTab: (input: import('@myyoda/shared').BrowserTabInput) => Promise<import('@myyoda/shared').BrowserViewState | null>
+  getAgentBrowserState: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState | null>
+  setAgentBrowserLayout: (layout: import('@myyoda/shared').BrowserViewLayout) => Promise<void>
+  navigateAgentBrowser: (input: import('@myyoda/shared').BrowserNavigateInput) => Promise<import('@myyoda/shared').BrowserViewState>
+  goBackAgentBrowser: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState>
+  goForwardAgentBrowser: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState>
+  reloadAgentBrowser: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState>
+  closeAgentBrowser: (sessionId: string) => Promise<void>
+  onAgentBrowserStateChanged: (callback: (state: import('@myyoda/shared').BrowserViewState) => void) => () => void
+
   // ===== Pull Request（本地 gh CLI） =====
 
   /** 获取 gh CLI 安装/登录状态 */
@@ -439,21 +466,6 @@ export interface ElectronAPI {
   checkoutPullRequest: (repoPath: string, number: number) => Promise<{ branch: string }>
   /** 查询分支是否被其他 worktree 占用（merge --delete-branch 安全） */
   getBranchWorktreeUsage: (repoPath: string, branch: string) => Promise<import('@myyoda/shared').BranchWorktreeUsage>
-
-  // ===== Pi 受管浏览器（主进程 WebContentsView） =====
-  openAgentBrowser: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState>
-  listAgentBrowserTabs: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState>
-  createAgentBrowserTab: (input: import('@myyoda/shared').BrowserCreateTabInput) => Promise<import('@myyoda/shared').BrowserViewState>
-  selectAgentBrowserTab: (input: import('@myyoda/shared').BrowserTabInput) => Promise<import('@myyoda/shared').BrowserViewState>
-  closeAgentBrowserTab: (input: import('@myyoda/shared').BrowserTabInput) => Promise<import('@myyoda/shared').BrowserViewState | null>
-  getAgentBrowserState: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState | null>
-  setAgentBrowserLayout: (layout: import('@myyoda/shared').BrowserViewLayout) => Promise<void>
-  navigateAgentBrowser: (input: import('@myyoda/shared').BrowserNavigateInput) => Promise<import('@myyoda/shared').BrowserViewState>
-  goBackAgentBrowser: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState>
-  goForwardAgentBrowser: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState>
-  reloadAgentBrowser: (sessionId: string) => Promise<import('@myyoda/shared').BrowserViewState>
-  closeAgentBrowser: (sessionId: string) => Promise<void>
-  onAgentBrowserStateChanged: (callback: (state: import('@myyoda/shared').BrowserViewState) => void) => () => void
 
   // ===== 通用工具 =====
 
@@ -765,14 +777,26 @@ export interface ElectronAPI {
 
   // ===== Agent 会话管理相关 =====
 
-  /** 获取 Agent 会话列表 */
-  listAgentSessions: () => Promise<AgentSessionMeta[]>
+  /** 获取 Agent 会话列表；renderer 热路径必须显式请求 active，兼容调用默认 all。 */
+  listAgentSessions: (scope?: 'active' | 'archived' | 'all') => Promise<AgentSessionMeta[]>
+
+  /** 按 ID 获取会话元数据，用于恢复少量已打开的归档 Tab。 */
+  getAgentSessionMeta: (id: string) => Promise<AgentSessionMeta | undefined>
+
+  /** 获取活跃/归档会话计数，避免归档入口传输完整 metadata。 */
+  getAgentSessionCounts: () => Promise<{ active: number; archived: number }>
 
   /** 创建 Agent 会话 */
   createAgentSession: (title?: string, channelId?: string, workspaceId?: string, modelId?: string) => Promise<AgentSessionMeta>
 
-  /** 获取 Agent 会话 SDKMessage（Phase 4 新格式） */
+  /** 获取 Agent 会话 SDKMessage（兼容需要完整历史的功能） */
   getAgentSessionSDKMessages: (id: string) => Promise<SDKMessage[]>
+
+  /** 从会话尾部按页读取 SDKMessage，避免长历史一次性进入 renderer。 */
+  getAgentSessionSDKMessagesPage: (
+    id: string,
+    input?: { before?: number; limit?: number },
+  ) => Promise<{ messages: SDKMessage[]; nextBefore?: number }>
 
   /** 更新 Agent 会话标题 */
   updateAgentSessionTitle: (id: string, title: string) => Promise<AgentSessionMeta>
@@ -862,11 +886,38 @@ export interface ElectronAPI {
   /** 获取 Agent 工作区列表 */
   listAgentWorkspaces: () => Promise<AgentWorkspace[]>
 
-  /** 创建 Agent 工作区 */
-  createAgentWorkspace: (name: string) => Promise<AgentWorkspace>
+  /** 创建 Agent 工作区（支持绑定本地项目根目录：从本地文件夹创建项目） */
+  createAgentWorkspace: (input: string | { name: string; projectRootPath?: string }) => Promise<AgentWorkspace>
+
+  /** 重新关联工作区本地项目根目录 */
+  relinkAgentWorkspaceProjectRoot: (id: string, projectRootPath: string) => Promise<AgentWorkspace>
+
+  /** 在缺失的原路径恢复空项目根目录 */
+  restoreAgentWorkspaceProjectRoot: (id: string) => Promise<AgentWorkspace>
+
+  /** 查询项目→工作区迁移状态 */
+  getProjectToWorkspaceMigrationStatus: (workspaceId: string) => Promise<{ done: boolean; pendingCount: number }>
+
+  /** 执行项目→工作区迁移（手动触发，含备份；幂等） */
+  runProjectToWorkspaceMigration: (workspaceId: string) => Promise<{
+    migrated: Array<{ projectId: string; projectName: string; workspaceId: string; workspaceName: string; migratedSessions: number; migratedTasks: number }>
+    skipped: Array<{ projectId: string; projectName: string; reason: string }>
+    migratedAutomationCount: number
+    backupPath: string
+    alreadyDone: boolean
+  }>
+
+  /** 列出工作区资产（workspace-files/assets/） */
+  listWorkspaceAssets: (workspaceSlug: string) => Promise<Array<{ filename: string; sizeBytes: number }>>
+
+  /** 上传工作区资产（base64） */
+  uploadWorkspaceAsset: (workspaceSlug: string, filename: string, base64: string) => Promise<{ filename: string; sizeBytes: number }>
+
+  /** 删除工作区资产 */
+  deleteWorkspaceAsset: (workspaceSlug: string, filename: string) => Promise<void>
 
   /** 更新 Agent 工作区 */
-  updateAgentWorkspace: (id: string, updates: { name: string }) => Promise<AgentWorkspace>
+  updateAgentWorkspace: (id: string, updates: { name?: string; kanbanColumns?: import('@myyoda/shared').KanbanColumnDef[] }) => Promise<AgentWorkspace>
 
   /** 删除 Agent 工作区 */
   deleteAgentWorkspace: (id: string) => Promise<void>
@@ -908,6 +959,28 @@ export interface ElectronAPI {
 
   /** 获取默认 Skills 的 slug 列表（来自 ~/.myyoda/default-skills/） */
   getDefaultSkillSlugs: () => Promise<string[]>
+
+  // 项目级 Skills / MCP（嵌套 Project 可选覆盖工作区级）
+  /** 项目是否已配置自己的 Skills */
+  hasProjectSkills: (workspaceSlug: string, projectId: string) => Promise<boolean>
+  /** 获取项目所有 Skills（含活跃和不活跃） */
+  getProjectSkills: (workspaceSlug: string, projectId: string) => Promise<SkillMeta[]>
+  /** 获取项目 Skills 目录绝对路径（仅解析，不自动创建） */
+  getProjectSkillsDir: (workspaceSlug: string, projectId: string) => Promise<string>
+  /** 删除项目 Skill */
+  deleteProjectSkill: (workspaceSlug: string, projectId: string, skillSlug: string) => Promise<void>
+  /** 切换项目 Skill 启用/禁用 */
+  toggleProjectSkill: (workspaceSlug: string, projectId: string, skillSlug: string, enabled: boolean) => Promise<void>
+  /** 项目是否已配置自己的 MCP 服务器 */
+  hasProjectMcpServers: (workspaceSlug: string, projectId: string) => Promise<boolean>
+  /** 获取项目级 MCP 配置 */
+  getProjectMcpConfig: (workspaceSlug: string, projectId: string) => Promise<WorkspaceMcpConfig>
+  /** 保存项目级 MCP 配置 */
+  saveProjectMcpConfig: (workspaceSlug: string, projectId: string, config: WorkspaceMcpConfig) => Promise<void>
+  /** 获取同工作区内可导入到当前 Project 的 Skill 来源（工作区默认 + 其他嵌套 Project） */
+  getOtherProjectSkills: (workspaceSlug: string, currentProjectId: string) => Promise<import('@myyoda/shared').OtherProjectSkillsGroup[]>
+  /** 从工作区默认或其他嵌套 Project 批量导入 Skill 到当前 Project */
+  batchImportSkillsToProject: (workspaceSlug: string, targetProjectId: string, selections: import('@myyoda/shared').BulkImportProjectSelection[]) => Promise<import('@myyoda/shared').BulkImportSkillsResult>
 
   /** 从其他工作区导入 Skill */
   importSkillFromWorkspace: (targetSlug: string, sourceSlug: string, skillSlug: string) => Promise<SkillMeta>
@@ -1011,6 +1084,10 @@ export interface ElectronAPI {
   /** 授权 Agent 主动维护工作区/项目 AGENTS.md 知识 */
   approveWorkspaceProjectKnowledgeMaintenance: (workspaceSlug: string) => Promise<void>
 
+
+  /** renderer 报告当前可见的 Agent 会话，用于提升其流式更新频率。 */
+  setVisibleAgentStreamSession: (sessionId: string | null) => Promise<void>
+
   /** 订阅 Agent 流式事件（返回清理函数） */
   onAgentStreamEvent: (callback: (event: AgentStreamEvent) => void) => () => void
 
@@ -1069,6 +1146,21 @@ export interface ElectronAPI {
 
   /** 获取所有待处理的交互请求快照（渲染进程重载后恢复状态） */
   getPendingRequests: () => Promise<PendingRequestsSnapshot>
+
+  // ===== 代码图谱工具（repo map + Graphify） =====
+
+  /** 查询图谱工具状态（纯读） */
+  getRepoMapToolsState: (cwd: string) => Promise<import('@myyoda/shared').RepoMapToolsState>
+  /** 幂等创建（对话栏按钮唯一主动入口） */
+  ensureRepoMapTools: (cwd: string, forceUpdate?: boolean) => Promise<import('@myyoda/shared').RepoMapToolsState>
+  /** 订阅状态变更推送（不轮询） */
+  onRepoMapToolsStatus: (callback: (state: import('@myyoda/shared').RepoMapToolsState) => void) => () => void
+  /** 一键安装 graphify（进度经 onRepoMapToolsInstallProgress 推送） */
+  installGraphify: () => Promise<import('@myyoda/shared').RepoMapToolsInstallResult>
+  /** 卸载 graphify */
+  uninstallGraphify: () => Promise<import('@myyoda/shared').RepoMapToolsInstallResult>
+  /** 安装/卸载进度推送（原始输出行） */
+  onRepoMapToolsInstallProgress: (callback: (line: string) => void) => () => void
 
   // ===== Agent 附件 =====
 
@@ -1282,6 +1374,14 @@ export interface ElectronAPI {
   listReleaseNotes: () => Promise<ReleaseNote[]>
   getLatestReleaseVersion: () => Promise<string | undefined>
   getCombinedReleaseNotes: () => Promise<string>
+
+  // ===== 用户反馈（→ Notion）=====
+  feedbackSubmit: (input: import('@myyoda/shared').FeedbackSubmitInput, appVersion?: string, platform?: string) => Promise<import('@myyoda/shared').FeedbackSubmitResult>
+  feedbackTestConnection: (config: import('@myyoda/shared').FeedbackNotionConfig) => Promise<import('@myyoda/shared').FeedbackTestConnectionResult>
+  feedbackGetConfig: () => Promise<{ configured: boolean; databaseId: string }>
+  feedbackSaveConfig: (config: import('@myyoda/shared').FeedbackNotionConfig) => Promise<void>
+  feedbackCaptureWindow: () => Promise<{ filePath: string; dataUrl: string } | null>
+  feedbackPickImages: () => Promise<Array<{ filePath: string; dataUrl: string }>>
 
   // 工作区文件变化通知
   onCapabilitiesChanged: (callback: () => void) => () => void
@@ -1586,6 +1686,7 @@ export interface ElectronAPI {
     analyzeDeleteImpact: (workspaceRoot: string, slug: string) => Promise<TaskDeleteImpact>
     delete: (workspaceRoot: string, workspaceId: string, slug: string, confirmationToken?: string) => Promise<void>
     getResults: (workspaceRoot: string, slug: string, runId?: string) => Promise<TaskResults | null>
+    resolveWorkingDirectory: (workspaceRoot: string, workspaceId: string, spec: { cwd?: string; project?: string }) => Promise<TaskWorkingDirectoryResult>
   }
   labels: {
     list: (workspaceRoot: string) => Promise<WorkspaceLabel[]>
@@ -1773,7 +1874,31 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(IPC_CHANNELS.GET_DETACHED_PREVIEW_DATA, previewId) as Promise<DetachedPreviewWindowData | null>
   },
 
-  // ===== Pull Request（本地 gh CLI） =====
+  openAgentBrowser: (sessionId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.OPEN_BROWSER, sessionId)
+  },
+  listAgentBrowserTabs: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_BROWSER_TABS, sessionId),
+  createAgentBrowserTab: (input: import('@myyoda/shared').BrowserCreateTabInput) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.CREATE_BROWSER_TAB, input),
+  selectAgentBrowserTab: (input: import('@myyoda/shared').BrowserTabInput) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.SELECT_BROWSER_TAB, input),
+  closeAgentBrowserTab: (input: import('@myyoda/shared').BrowserTabInput) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.CLOSE_BROWSER_TAB, input),
+  getAgentBrowserState: (sessionId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_BROWSER_STATE, sessionId)
+  },
+  setAgentBrowserLayout: (layout: import('@myyoda/shared').BrowserViewLayout) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SET_BROWSER_LAYOUT, layout)
+  },
+  navigateAgentBrowser: (input: import('@myyoda/shared').BrowserNavigateInput) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.NAVIGATE_BROWSER, input)
+  },
+  goBackAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.GO_BACK_BROWSER, sessionId),
+  goForwardAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.GO_FORWARD_BROWSER, sessionId),
+  reloadAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.RELOAD_BROWSER, sessionId),
+  closeAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.CLOSE_BROWSER, sessionId),
+  onAgentBrowserStateChanged: (callback: (state: import('@myyoda/shared').BrowserViewState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: import('@myyoda/shared').BrowserViewState) => callback(state)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.BROWSER_STATE_CHANGED, listener)
+    return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.BROWSER_STATE_CHANGED, listener)
+  },
 
   getGhCliStatus: () => {
     return ipcRenderer.invoke(PR_IPC_CHANNELS.GH_STATUS)
@@ -1821,32 +1946,6 @@ const electronAPI: ElectronAPI = {
 
   getBranchWorktreeUsage: (repoPath: string, branch: string) => {
     return ipcRenderer.invoke(PR_IPC_CHANNELS.BRANCH_WORKTREE_USAGE, { repoPath, branch })
-  },
-
-  openAgentBrowser: (sessionId: string) => {
-    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.OPEN_BROWSER, sessionId)
-  },
-  listAgentBrowserTabs: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_BROWSER_TABS, sessionId),
-  createAgentBrowserTab: (input: import('@myyoda/shared').BrowserCreateTabInput) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.CREATE_BROWSER_TAB, input),
-  selectAgentBrowserTab: (input: import('@myyoda/shared').BrowserTabInput) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.SELECT_BROWSER_TAB, input),
-  closeAgentBrowserTab: (input: import('@myyoda/shared').BrowserTabInput) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.CLOSE_BROWSER_TAB, input),
-  getAgentBrowserState: (sessionId: string) => {
-    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_BROWSER_STATE, sessionId)
-  },
-  setAgentBrowserLayout: (layout: import('@myyoda/shared').BrowserViewLayout) => {
-    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SET_BROWSER_LAYOUT, layout)
-  },
-  navigateAgentBrowser: (input: import('@myyoda/shared').BrowserNavigateInput) => {
-    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.NAVIGATE_BROWSER, input)
-  },
-  goBackAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.GO_BACK_BROWSER, sessionId),
-  goForwardAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.GO_FORWARD_BROWSER, sessionId),
-  reloadAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.RELOAD_BROWSER, sessionId),
-  closeAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.CLOSE_BROWSER, sessionId),
-  onAgentBrowserStateChanged: (callback: (state: import('@myyoda/shared').BrowserViewState) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, state: import('@myyoda/shared').BrowserViewState) => callback(state)
-    ipcRenderer.on(AGENT_IPC_CHANNELS.BROWSER_STATE_CHANGED, listener)
-    return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.BROWSER_STATE_CHANGED, listener)
   },
 
   // 通用工具
@@ -2259,8 +2358,16 @@ const electronAPI: ElectronAPI = {
   },
 
   // Agent 会话管理
-  listAgentSessions: () => {
-    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_SESSIONS)
+  listAgentSessions: (scope: 'active' | 'archived' | 'all' = 'all') => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_SESSIONS, scope)
+  },
+
+  getAgentSessionMeta: (id: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SESSION_META, id)
+  },
+
+  getAgentSessionCounts: () => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SESSION_COUNTS)
   },
 
   createAgentSession: (title?: string, channelId?: string, workspaceId?: string, modelId?: string) => {
@@ -2269,6 +2376,10 @@ const electronAPI: ElectronAPI = {
 
   getAgentSessionSDKMessages: (id: string) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SDK_MESSAGES, id)
+  },
+
+  getAgentSessionSDKMessagesPage: (id: string, input?: { before?: number; limit?: number }) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SDK_MESSAGES_PAGE, id, input)
   },
 
   updateAgentSessionTitle: (id: string, title: string) => {
@@ -2386,11 +2497,39 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_WORKSPACES)
   },
 
-  createAgentWorkspace: (name: string) => {
-    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.CREATE_WORKSPACE, name)
+  createAgentWorkspace: (input: string | { name: string; projectRootPath?: string }) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.CREATE_WORKSPACE, input)
   },
 
-  updateAgentWorkspace: (id: string, updates: { name: string }) => {
+  relinkAgentWorkspaceProjectRoot: (id: string, projectRootPath: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.RELINK_WORKSPACE_PROJECT_ROOT, id, projectRootPath)
+  },
+
+  restoreAgentWorkspaceProjectRoot: (id: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.RESTORE_WORKSPACE_PROJECT_ROOT, id)
+  },
+
+  getProjectToWorkspaceMigrationStatus: (workspaceId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_PROJECT_WORKSPACE_MIGRATION_STATUS, workspaceId)
+  },
+
+  runProjectToWorkspaceMigration: (workspaceId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.RUN_PROJECT_WORKSPACE_MIGRATION, workspaceId)
+  },
+
+  listWorkspaceAssets: (workspaceSlug: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_WORKSPACE_ASSETS, workspaceSlug)
+  },
+
+  uploadWorkspaceAsset: (workspaceSlug: string, filename: string, base64: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPLOAD_WORKSPACE_ASSET, workspaceSlug, filename, base64)
+  },
+
+  deleteWorkspaceAsset: (workspaceSlug: string, filename: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.DELETE_WORKSPACE_ASSET, workspaceSlug, filename)
+  },
+
+  updateAgentWorkspace: (id: string, updates: { name?: string; kanbanColumns?: import('@myyoda/shared').KanbanColumnDef[] }) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_WORKSPACE, id, updates)
   },
 
@@ -2445,6 +2584,51 @@ const electronAPI: ElectronAPI = {
 
   getDefaultSkillSlugs: () => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_DEFAULT_SKILL_SLUGS)
+  },
+
+  hasProjectSkills: (workspaceSlug: string, projectId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.HAS_PROJECT_SKILLS, workspaceSlug, projectId)
+  },
+
+  getProjectSkills: (workspaceSlug: string, projectId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_PROJECT_SKILLS, workspaceSlug, projectId)
+  },
+
+  getProjectSkillsDir: (workspaceSlug: string, projectId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_PROJECT_SKILLS_DIR, workspaceSlug, projectId)
+  },
+
+  deleteProjectSkill: (workspaceSlug: string, projectId: string, skillSlug: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.DELETE_PROJECT_SKILL, workspaceSlug, projectId, skillSlug)
+  },
+
+  toggleProjectSkill: (workspaceSlug: string, projectId: string, skillSlug: string, enabled: boolean) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.TOGGLE_PROJECT_SKILL, workspaceSlug, projectId, skillSlug, enabled)
+  },
+
+  hasProjectMcpServers: (workspaceSlug: string, projectId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.HAS_PROJECT_MCP_SERVERS, workspaceSlug, projectId)
+  },
+
+  getProjectMcpConfig: (workspaceSlug: string, projectId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_PROJECT_MCP_CONFIG, workspaceSlug, projectId)
+  },
+
+  saveProjectMcpConfig: (workspaceSlug: string, projectId: string, config: WorkspaceMcpConfig) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SAVE_PROJECT_MCP_CONFIG, workspaceSlug, projectId, config)
+  },
+
+  getOtherProjectSkills: (workspaceSlug: string, currentProjectId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_OTHER_PROJECT_SKILLS, workspaceSlug, currentProjectId)
+  },
+
+  batchImportSkillsToProject: (workspaceSlug: string, targetProjectId: string, selections: import('@myyoda/shared').BulkImportProjectSelection[]) => {
+    return ipcRenderer.invoke(
+      AGENT_IPC_CHANNELS.BATCH_IMPORT_SKILLS_TO_PROJECT,
+      workspaceSlug,
+      targetProjectId,
+      selections,
+    )
   },
 
   importSkillFromWorkspace: (targetSlug: string, sourceSlug: string, skillSlug: string) => {
@@ -2629,6 +2813,10 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.APPROVE_WORKSPACE_PROJECT_KNOWLEDGE_MAINTENANCE, workspaceSlug)
   },
 
+  setVisibleAgentStreamSession: (sessionId: string | null) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SET_VISIBLE_STREAM_SESSION, sessionId)
+  },
+
   onAgentStreamEvent: (callback: (event: AgentStreamEvent) => void) => {
     const listener = (_: unknown, event: AgentStreamEvent): void => callback(event)
     ipcRenderer.on(AGENT_IPC_CHANNELS.STREAM_EVENT, listener)
@@ -2711,6 +2899,30 @@ const electronAPI: ElectronAPI = {
   // 待处理请求恢复
   getPendingRequests: () => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_PENDING_REQUESTS)
+  },
+
+  // 代码图谱工具（repo map + Graphify）
+  getRepoMapToolsState: (cwd: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.REPO_MAP_TOOLS_GET_STATE, cwd)
+  },
+  ensureRepoMapTools: (cwd: string, forceUpdate?: boolean) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.REPO_MAP_TOOLS_ENSURE, cwd, forceUpdate === true)
+  },
+  onRepoMapToolsStatus: (callback: (state: import('@myyoda/shared').RepoMapToolsState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: import('@myyoda/shared').RepoMapToolsState): void => callback(state)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.REPO_MAP_TOOLS_STATUS, listener)
+    return () => { ipcRenderer.removeListener(AGENT_IPC_CHANNELS.REPO_MAP_TOOLS_STATUS, listener) }
+  },
+  installGraphify: () => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.REPO_MAP_TOOLS_INSTALL)
+  },
+  uninstallGraphify: () => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.REPO_MAP_TOOLS_UNINSTALL)
+  },
+  onRepoMapToolsInstallProgress: (callback: (line: string) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, line: string): void => callback(line)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.REPO_MAP_TOOLS_INSTALL_PROGRESS, listener)
+    return () => { ipcRenderer.removeListener(AGENT_IPC_CHANNELS.REPO_MAP_TOOLS_INSTALL_PROGRESS, listener) }
   },
 
   // 工作区文件变化通知
@@ -3005,6 +3217,31 @@ const electronAPI: ElectronAPI = {
 
   getCombinedReleaseNotes: () => {
     return ipcRenderer.invoke(RELEASE_NOTES_IPC_CHANNELS.COMBINED)
+  },
+
+  // ===== 用户反馈（→ Notion）=====
+  feedbackSubmit: (input, appVersion, platform) => {
+    return ipcRenderer.invoke(FEEDBACK_IPC_CHANNELS.SUBMIT, input, appVersion, platform)
+  },
+
+  feedbackTestConnection: (config) => {
+    return ipcRenderer.invoke(FEEDBACK_IPC_CHANNELS.TEST_CONNECTION, config)
+  },
+
+  feedbackGetConfig: () => {
+    return ipcRenderer.invoke(FEEDBACK_IPC_CHANNELS.GET_CONFIG)
+  },
+
+  feedbackSaveConfig: (config) => {
+    return ipcRenderer.invoke(FEEDBACK_IPC_CHANNELS.SAVE_CONFIG, config)
+  },
+
+  feedbackCaptureWindow: () => {
+    return ipcRenderer.invoke(FEEDBACK_IPC_CHANNELS.CAPTURE_WINDOW)
+  },
+
+  feedbackPickImages: () => {
+    return ipcRenderer.invoke(FEEDBACK_IPC_CHANNELS.PICK_IMAGES)
   },
 
   // ===== 飞书集成 =====
@@ -3596,6 +3833,8 @@ const electronAPI: ElectronAPI = {
       invokeTyped<void>(TASK_IPC_CHANNELS.DELETE, workspaceRoot, workspaceId, slug, confirmationToken),
     getResults: (workspaceRoot: string, slug: string, runId?: string): Promise<TaskResults | null> =>
       invokeTyped<TaskResults | null>(TASK_IPC_CHANNELS.GET_RESULTS, workspaceRoot, slug, runId),
+    resolveWorkingDirectory: (workspaceRoot: string, workspaceId: string, spec: { cwd?: string; project?: string }): Promise<TaskWorkingDirectoryResult> =>
+      invokeTyped<TaskWorkingDirectoryResult>(TASK_IPC_CHANNELS.RESOLVE_WORKING_DIRECTORY, workspaceRoot, workspaceId, spec),
   },
   labels: {
     list: (workspaceRoot: string): Promise<WorkspaceLabel[]> =>

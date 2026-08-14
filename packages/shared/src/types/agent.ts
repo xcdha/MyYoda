@@ -1,4 +1,5 @@
 import type { ProviderType } from './channel'
+import type { KanbanColumnDef } from '../projects/types'
 
 /**
  * Agent 相关类型定义
@@ -19,10 +20,37 @@ export interface AgentWorkspace {
   name: string
   /** URL-safe 目录名（创建后不可变） */
   slug: string
+  /**
+   * 用户选择的本地项目根目录。未设置时，项目文件使用 MyYoda 托管的
+   * workspace-files/ 目录；设置后，项目文件直接指向该原始目录。
+   * （对齐 upstream Proma：工作区 = 项目，projectRootPath 即工程目录）
+   */
+  projectRootPath?: string
+  /** 本地项目根目录的运行时状态；Proma 托管项目不设置此字段。 */
+  projectRootStatus?: LocalProjectRootStatus
+  /** 工作区自定义看板列（对齐看板=工作区模型）；缺省用默认四列（待办/进行中/待验收/已完成） */
+  kanbanColumns?: KanbanColumnDef[]
   /** 创建时间戳 */
   createdAt: number
   /** 更新时间戳 */
   updatedAt: number
+}
+
+/** 本地项目根目录的即时可用状态；仅在读取工作区列表时计算，不写入索引。 */
+export type LocalProjectRootStatus = 'available' | 'missing' | 'not_directory' | 'unavailable'
+
+/** 新建项目（工作区）的输入。 */
+export interface CreateAgentWorkspaceInput {
+  /** 项目显示名称 */
+  name: string
+  /** 可选的用户本地项目根目录 */
+  projectRootPath?: string
+  /**
+   * 仅供主进程交互式创建入口（CREATE_WORKSPACE IPC handler）使用：默认 Skills 模板后台异步拷贝，
+   * 工作区立即可用，不阻塞 cpSync 同步拷贝导致主线程卡顿。迁移等需要同步完成后立即读
+   * Skills 目录的内部调用方不传，保持原有同步语义。还原为未设置时等同 false（同步）。
+   */
+  deferSkillsCopy?: boolean
 }
 
 // ===== SDK 新增类型声明（0.2.52 ~ 0.2.63） =====
@@ -272,6 +300,8 @@ export interface SDKAssistantMessage {
   isReplay?: boolean
   /** 渠道配置的模型 ID，持久化/流式期间注入，用于正确匹配模型显示名 */
   _channelModelId?: string
+  /** 产生此消息的渠道 ID；用于在同名模型跨渠道时恢复精确展示信息。 */
+  _channelId?: string
   /** 渠道 provider，用于按 Agent SDK 实际运行窗口计算压缩阈值 */
   _channelProvider?: ProviderType
 }
@@ -335,6 +365,8 @@ export interface SDKResultMessage {
   skill_activations?: SkillActivation[]
   /** 渠道配置的模型 ID，用于缺失 modelUsage.contextWindow 时按 Agent SDK 运行窗口兜底 */
   _channelModelId?: string
+  /** 产生此消息的渠道 ID；用于在同名模型跨渠道时恢复精确展示信息。 */
+  _channelId?: string
   /** 渠道 provider，用于按 Agent SDK 实际运行窗口计算压缩阈值 */
   _channelProvider?: ProviderType
 }
@@ -672,7 +704,7 @@ export type MyYodaEvent =
   | { type: 'context_window'; contextWindow: number }
   | { type: 'permission_mode_changed'; mode: MyYodaPermissionMode }
   | { type: 'title_updated'; title: string }
-  | { type: 'external_run_started'; source: AgentExternalRunSource; sessionId: string; title?: string; workspaceId?: string; modelId?: string; startedAt: number; session?: AgentSessionMeta }
+  | { type: 'external_run_started'; source: AgentExternalRunSource; sessionId: string; title?: string; workspaceId?: string; modelId?: string; channelId?: string; startedAt: number; session?: AgentSessionMeta }
   /** 普通桌面会话已开始执行；startedAt 用于区分同一会话的连续运行。 */
   | { type: 'run_started'; startedAt: number }
   | { type: 'run_resumed'; sessionId: string }
@@ -1221,6 +1253,22 @@ export interface OtherWorkspaceSkillsGroup {
   skills: SkillMeta[]
 }
 
+/**
+ * 跨嵌套 Project 导入 Skill 的来源分组：工作区默认（跨项目共享），或同一工作区下另一个嵌套 Project 自己的 Skills。
+ *
+ * 与 OtherWorkspaceSkillsGroup（跨工作区导入）是两套独立机制：这里的"其他来源"限定在当前工作区内，
+ * 对齐 Proma 单层实体里"跨工作区导入"的真实粒度（Proma 一个 workspace = 一个仓库，等价于这里的一个嵌套 Project）。
+ */
+export interface OtherProjectSkillsGroup {
+  /** 'workspace' = 工作区默认（跨项目共享）；'project' = 同工作区下另一个嵌套 Project */
+  sourceKind: 'workspace' | 'project'
+  /** sourceKind='project' 时的 Project ID；'workspace' 来源不填 */
+  sourceProjectId?: string
+  /** 展示名称（工作区名或 Project 名） */
+  sourceLabel: string
+  skills: SkillMeta[]
+}
+
 // ===== 企业版组织 Skills 分发 =====
 
 /** 组织连接配置（~/.myyoda/org-settings.json） */
@@ -1350,6 +1398,13 @@ export interface BulkImportSkillsResult {
 /** 从其他工作区批量导入的选中项 */
 export interface BulkImportWorkspaceSelection {
   sourceSlug: string
+  skillSlug: string
+}
+
+/** 跨嵌套 Project 批量导入 Skill 的单项选择 */
+export interface BulkImportProjectSelection {
+  sourceKind: 'workspace' | 'project'
+  sourceProjectId?: string
   skillSlug: string
 }
 
@@ -1623,8 +1678,8 @@ export interface AgentStreamEvent {
 }
 
 /**
- * Agent 流式完成事件载荷（主进程 → 渲染进程）
- * 包含已持久化的消息列表，避免异步重新加载的竞态窗口。
+ * Agent 流式完成事件载荷（主进程 → 渲染进程）。
+ * 消息已在主进程落盘；renderer 收到完成事件后自行按页刷新，避免传输整段历史。
  */
 export interface AgentStreamCompletePayload {
   sessionId: string
@@ -1634,8 +1689,6 @@ export interface AgentStreamCompletePayload {
   sourceDelegationId?: string
   /** 完成会话所属的 Task DAG 节点 ID；用于避免子任务节点完成通知竞态 */
   taskNodeId?: string
-  /** 已持久化的完整消息列表 */
-  messages?: AgentMessage[]
   /** 是否由用户手动中止 */
   stoppedByUser?: boolean
   /** 本轮流式开始时间戳（用于区分新旧流，防止旧流的 complete 事件重置新流状态） */
@@ -1673,7 +1726,7 @@ export interface AgentSessionFileRoots {
   /** Agent 本轮实际执行 cwd。 */
   executionCwd: string
   /** executionCwd 的来源。 */
-  executionSource: 'worktree' | 'project' | 'sandbox'
+  executionSource: 'worktree' | 'workspace-root' | 'project' | 'sandbox'
   /** 当前会话实际使用的 Project root；sandbox 会话为空。 */
   projectRoot?: string
   /** 绑定的 Project ID。 */
@@ -1684,8 +1737,6 @@ export interface AgentSessionFileRoots {
   projectUnavailablePath?: string
   /** Workspace Files 根目录。 */
   workspaceFilesPath: string
-  /** 持久化的 Workspace 级会话 Outbox。 */
-  sessionOutboxPath: string
 }
 
 /** Agent turn 捕获到的文件变化。 */
@@ -1697,7 +1748,7 @@ export interface AgentOutputRecord {
   projectId?: string
   path: string
   relativePath: string
-  scope: 'outbox' | 'session' | 'project'
+  scope: 'session' | 'project'
   change: 'created' | 'modified'
   capturedAt: number
   turnStartedAt: number
@@ -1982,10 +2033,16 @@ export const AGENT_IPC_CHANNELS = {
   // 会话管理
   /** 获取会话列表 */
   LIST_SESSIONS: 'agent:list-sessions',
+  /** 按 ID 获取单条会话元数据（启动恢复归档 Tab 时使用） */
+  GET_SESSION_META: 'agent:get-session-meta',
+  /** 获取活跃/归档会话的数量，不传输完整元数据 */
+  GET_SESSION_COUNTS: 'agent:get-session-counts',
   /** 创建会话 */
   CREATE_SESSION: 'agent:create-session',
   /** 获取会话 SDKMessage（Phase 4 新格式） */
   GET_SDK_MESSAGES: 'agent:get-sdk-messages',
+  /** 分页获取会话尾部 SDKMessage，避免长历史一次性进入 renderer */
+  GET_SDK_MESSAGES_PAGE: 'agent:get-sdk-messages-page',
   /** 更新会话标题 */
   UPDATE_TITLE: 'agent:update-title',
   /** 更新会话模型选择 */
@@ -2026,6 +2083,20 @@ export const AGENT_IPC_CHANNELS = {
   DELETE_WORKSPACE: 'agent:delete-workspace',
   /** 重排工作区顺序 */
   REORDER_WORKSPACES: 'agent:reorder-workspaces',
+  /** 重新关联工作区本地项目根目录 */
+  RELINK_WORKSPACE_PROJECT_ROOT: 'agent:relink-workspace-project-root',
+  /** 在缺失的原路径恢复空项目根目录 */
+  RESTORE_WORKSPACE_PROJECT_ROOT: 'agent:restore-workspace-project-root',
+  /** 查询项目→工作区迁移状态 */
+  GET_PROJECT_WORKSPACE_MIGRATION_STATUS: 'agent:get-project-workspace-migration-status',
+  /** 列出工作区资产 */
+  LIST_WORKSPACE_ASSETS: 'agent:list-workspace-assets',
+  /** 上传工作区资产（base64） */
+  UPLOAD_WORKSPACE_ASSET: 'agent:upload-workspace-asset',
+  /** 删除工作区资产 */
+  DELETE_WORKSPACE_ASSET: 'agent:delete-workspace-asset',
+  /** 执行项目→工作区迁移（手动触发） */
+  RUN_PROJECT_WORKSPACE_MIGRATION: 'agent:run-project-workspace-migration',
 
   // 标题生成
   /** 生成 Agent 会话标题 */
@@ -2083,6 +2154,28 @@ export const AGENT_IPC_CHANNELS = {
   TOGGLE_SKILL: 'agent:toggle-skill',
   /** 获取其他工作区的 Skill 列表 */
   GET_OTHER_WORKSPACE_SKILLS: 'agent:get-other-workspace-skills',
+
+  // 项目级 Skills / MCP（嵌套 Project 可选覆盖工作区级，未配置时 UI 层面 fallback 到工作区级）
+  /** 获取项目级 Skill 列表 */
+  GET_PROJECT_SKILLS: 'agent:get-project-skills',
+  /** 项目是否已配置自己的 Skills */
+  HAS_PROJECT_SKILLS: 'agent:has-project-skills',
+  /** 获取项目 Skills 目录绝对路径（仅解析，不自动创建） */
+  GET_PROJECT_SKILLS_DIR: 'agent:get-project-skills-dir',
+  /** 删除项目 Skill */
+  DELETE_PROJECT_SKILL: 'agent:delete-project-skill',
+  /** 切换项目 Skill 启用/禁用 */
+  TOGGLE_PROJECT_SKILL: 'agent:toggle-project-skill',
+  /** 获取项目级 MCP 配置 */
+  GET_PROJECT_MCP_CONFIG: 'agent:get-project-mcp-config',
+  /** 保存项目级 MCP 配置 */
+  SAVE_PROJECT_MCP_CONFIG: 'agent:save-project-mcp-config',
+  /** 项目是否已配置自己的 MCP 服务器 */
+  HAS_PROJECT_MCP_SERVERS: 'agent:has-project-mcp-servers',
+  /** 获取同工作区内可导入到当前 Project 的 Skill 来源（工作区默认 + 其他嵌套 Project） */
+  GET_OTHER_PROJECT_SKILLS: 'agent:get-other-project-skills',
+  /** 从工作区默认或其他嵌套 Project 批量导入 Skill 到当前 Project */
+  BATCH_IMPORT_SKILLS_TO_PROJECT: 'agent:batch-import-skills-to-project',
   /** 获取默认 Skills 的 slug 列表（来自 ~/.myyoda/default-skills/） */
   GET_DEFAULT_SKILL_SLUGS: 'agent:get-default-skill-slugs',
   /** 从其他工作区导入 Skill 到当前工作区 */
@@ -2170,6 +2263,8 @@ export const AGENT_IPC_CHANNELS = {
   STREAM_COMPLETE: 'agent:stream:complete',
   /** Agent 流式错误 */
   STREAM_ERROR: 'agent:stream:error',
+  /** renderer 报告当前可见的 Agent 会话，用于流式优先级。 */
+  SET_VISIBLE_STREAM_SESSION: 'agent:set-visible-stream-session',
 
   // 附件
   /** 保存文件到 Agent session 工作目录 */
@@ -2307,6 +2402,20 @@ export const AGENT_IPC_CHANNELS = {
   // 待处理请求恢复（渲染进程重载后查询主进程状态）
   /** 获取所有待处理的交互请求快照 */
   GET_PENDING_REQUESTS: 'agent:get-pending-requests',
+
+  // 代码图谱工具（repo map + Graphify，2026-08-13）
+  /** 查询图谱工具状态（渲染进程 → 主进程） */
+  REPO_MAP_TOOLS_GET_STATE: 'agent:repo-map-tools:get-state',
+  /** 幂等创建（对话栏按钮唯一主动入口；渲染进程 → 主进程） */
+  REPO_MAP_TOOLS_ENSURE: 'agent:repo-map-tools:ensure',
+  /** 状态变更推送（主进程 → 渲染进程，不轮询） */
+  REPO_MAP_TOOLS_STATUS: 'agent:repo-map-tools:status',
+  /** 一键安装 graphify（渲染进程 → 主进程；进度经 REPO_MAP_TOOLS_INSTALL_PROGRESS 推送） */
+  REPO_MAP_TOOLS_INSTALL: 'agent:repo-map-tools:install',
+  /** 卸载 graphify（渲染进程 → 主进程） */
+  REPO_MAP_TOOLS_UNINSTALL: 'agent:repo-map-tools:uninstall',
+  /** 安装/卸载进度推送（主进程 → 渲染进程） */
+  REPO_MAP_TOOLS_INSTALL_PROGRESS: 'agent:repo-map-tools:install-progress',
 } as const
 
 /**
@@ -2319,4 +2428,33 @@ export interface PendingRequestsSnapshot {
   askUsers: AskUserRequest[]
   /** 待处理的 ExitPlanMode 请求 */
   exitPlans: ExitPlanModeRequest[]
+}
+
+// ===== 代码图谱工具（repo map + Graphify，2026-08-13） =====
+
+/** 图谱工具状态机 */
+export type RepoMapToolsStatus = 'idle' | 'running' | 'done' | 'failed' | 'unavailable'
+
+/** 图谱工具状态（按主仓库） */
+export interface RepoMapToolsState {
+  /** 整体状态 */
+  status: RepoMapToolsStatus
+  /** repo map 已就绪（主仓库 .git/repo-map/maps/ 有缓存或内存命中） */
+  mapReady: boolean
+  /** Graphify 图谱已就绪（主仓库 graphify-out/graph.json 存在） */
+  graphReady: boolean
+  /** graphify 命令可用 */
+  graphifyInstalled: boolean
+  /** 主仓库路径（worktree 会话解析到真实仓库根；非 git 为 undefined） */
+  mainRepo?: string
+  /** 失败信息（status=failed/unavailable 时） */
+  error?: string
+  /** 进行中阶段描述（status=running 时） */
+  progress?: string
+}
+
+/** graphify 安装/卸载结果 */
+export interface RepoMapToolsInstallResult {
+  ok: boolean
+  error?: string
 }

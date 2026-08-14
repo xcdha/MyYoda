@@ -71,7 +71,7 @@ export const DEFAULT_SHORTCUTS: ShortcutDefinition[] = [
   {
     id: 'new-todo',
     name: '新建 Todo/日程/定时任务',
-    description: 'Task 日历内按当前子页签新建 Todo、日程或定时任务',
+    description: '计划内按当前子页签新建 Todo、日程或定时任务',
     defaultMac: 'Cmd+T',
     defaultWin: 'Ctrl+T',
     category: 'app',
@@ -89,7 +89,7 @@ export const DEFAULT_SHORTCUTS: ShortcutDefinition[] = [
     name: '切换侧边栏',
     description: '显示或隐藏左侧边栏',
     defaultMac: 'Cmd+B',
-    defaultWin: 'Ctrl+B',
+    defaultWin: 'Ctrl+Shift+E',
     category: 'app',
   },
   {
@@ -118,8 +118,8 @@ export const DEFAULT_SHORTCUTS: ShortcutDefinition[] = [
   },
   {
     id: 'global-search',
-    name: '全局搜索',
-    description: '搜索对话和会话',
+    name: '搜索',
+    description: '打开搜索弹窗（标题/内容搜索 + 最近会话按时间分组）',
     defaultMac: 'Cmd+Shift+F',
     defaultWin: 'Ctrl+Shift+F',
     category: 'navigation',
@@ -159,13 +159,13 @@ export const DEFAULT_SHORTCUTS: ShortcutDefinition[] = [
     localFallback: true,
   },
 
-  // 编辑级（输入框格式化，仅 macOS — Cmd+B/S 被全局快捷键占用）
+  // 编辑级（输入框格式化 — macOS 上 Cmd+B 被切换侧边栏占用，改用 Ctrl+B；Windows 上 Ctrl+B 直接加粗）
   {
     id: 'editor-bold',
     name: '加粗 / 取消加粗',
-    description: '输入框中切换文字加粗（因 Cmd+B 已用于切换侧边栏）',
+    description: '输入框中切换文字加粗',
     defaultMac: 'Ctrl+B',
-    defaultWin: '',
+    defaultWin: 'Ctrl+B',
     category: 'edit',
     readonly: true,
   },
