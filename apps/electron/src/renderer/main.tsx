@@ -68,6 +68,14 @@ import {
   initializeMarkdownFontSize,
 } from './atoms/markdown-font-size'
 import {
+  typographySettingsAtom,
+  initializeTypographySettings,
+} from './atoms/typography-settings'
+import {
+  areaStylesAtom,
+  initializeAreaStyles,
+} from './atoms/area-styles'
+import {
   sidebarModuleCollapsedMapAtom,
   initializeSidebarModuleCollapsed,
 } from './atoms/sidebar-module-atoms'
@@ -84,7 +92,7 @@ import { dingtalkBotStatesAtom } from './atoms/dingtalk-atoms'
 import { currentConversationIdAtom, channelsAtom, channelsLoadedAtom, selectedModelAtom } from './atoms/chat-atoms'
 import { chatToolsAtom } from './atoms/chat-tool-atoms'
 import { appModeAtom } from './atoms/app-mode'
-import type { AgentSessionMeta, FeishuBotBridgeState, FeishuBridgeState, DingTalkBotBridgeState, DingTalkBridgeState } from '@myyoda/shared'
+import type { FeishuBotBridgeState, FeishuBridgeState, DingTalkBotBridgeState, DingTalkBridgeState } from '@myyoda/shared'
 import { Toaster } from './components/ui/sonner'
 import { toast } from 'sonner'
 import { ArrowUpRight } from 'lucide-react'
@@ -101,11 +109,9 @@ import { diffCapabilities, UPDATER_LINKS } from '@myyoda/shared'
 import type { GitHubRelease, WorkspaceCapabilities } from '@myyoda/shared'
 import { showCapabilityChangeToasts } from './lib/capabilities-toast'
 import { ProjectsInitializer } from './components/ProjectsInitializer'
-import { DiscoverInitializer } from './components/discover/DiscoverInitializer'
 import { GlobalShortcuts } from './components/shortcuts/GlobalShortcuts'
 import { ShortcutGuideDialog } from './components/shortcuts/ShortcutGuideDialog'
 import { FaqDialog } from './components/faq/FaqDialog'
-import { FeedbackDialog } from './components/feedback/FeedbackDialog'
 import { VoiceDictationApp } from './components/voice-dictation/VoiceDictationApp'
 import { TabSwitcher } from './components/tabs/TabSwitcher'
 import { htmlToMarkdown, markdownToHtml } from './lib/markdown-rich-text'
@@ -594,7 +600,7 @@ function AutomationInitializer(): null {
         // 路径可能漏掉移除，导致已发消息的会话被持久化 draft 标记永久隐藏（重启也无效）。
         // 此处以索引权威状态为准双向收敛：不用 createdAt !== updatedAt 判定（历史空会话
         // 的 updatedAt 可能被 touch，仅凭时间差会误移出 draft），改用 messageCount/sdkSessionId/
-        // piSessionFile/title 等"确已发消息"信号。
+        // piSessionFile/title 等“确已发消息”信号。
         setDraftSessionIds((prev) => {
           const next = new Set(prev)
           let changed = false
@@ -741,16 +747,46 @@ function UiPreferencesInitializer(): null {
 }
 
 /**
- * Markdown 字号初始化组件
+ * Markdown 字号 / 排版 / 区域样式初始化组件
  *
- * 从主进程加载字号档位，写入 :root CSS 变量驱动 Markdown 预览。
+ * 从主进程加载字号档位、正文排版与按区域字体/颜色设置，
+ * 写入 :root CSS 变量驱动渲染。
  */
 function MarkdownFontSizeInitializer(): null {
   const setMarkdownFontSize = useSetAtom(markdownFontSizeAtom)
+  const setTypography = useSetAtom(typographySettingsAtom)
+  const setAreaStyles = useSetAtom(areaStylesAtom)
 
   useEffect(() => {
     initializeMarkdownFontSize(setMarkdownFontSize)
-  }, [setMarkdownFontSize])
+    initializeTypographySettings(setTypography)
+    initializeAreaStyles(setAreaStyles)
+  }, [setMarkdownFontSize, setTypography, setAreaStyles])
+
+  return null
+}
+
+/**
+ * Ctrl/⌘+滚轮缩放监听组件
+ *
+ * 与浏览器行为一致：按住 Ctrl（Windows/Linux）或 Cmd（macOS）滚动滚轮，
+ * 上滑放大 / 下滑缩小。DOM wheel 事件能取到 deltaY 与 ctrlKey/metaKey，
+ * 通过 electronAPI.zoomByDelta 请求主进程缩放（主进程处理后广播新系数）。
+ * 普通滚动（未按修饰键）不拦截，保持默认滚动行为。
+ */
+function WheelZoomListener(): null {
+  useEffect(() => {
+    const handleWheel = (event: WheelEvent): void => {
+      if (!event.ctrlKey && !event.metaKey) return
+      if (event.altKey) return
+      // 仅在主要窗口区域触发，避免影响内嵌浏览器（WebContentsView 的 wheel
+      // 不会冒泡到主 renderer，此处天然隔离）
+      event.preventDefault()
+      window.electronAPI.zoomByDelta(-event.deltaY)
+    }
+    window.addEventListener('wheel', handleWheel, { passive: false })
+    return () => window.removeEventListener('wheel', handleWheel)
+  }, [])
 
   return null
 }
@@ -1221,6 +1257,7 @@ if (isQuickTaskWindow) {
       <React.StrictMode>
         <ThemeInitializer />
         <MarkdownFontSizeInitializer />
+        <WheelZoomListener />
         <DetachedPreviewApp />
         <Toaster position="bottom-right" />
       </React.StrictMode>
@@ -1268,6 +1305,7 @@ if (isQuickTaskWindow) {
       <DockBadgeInitializer />
       <UiPreferencesInitializer />
       <MarkdownFontSizeInitializer />
+      <WheelZoomListener />
       <SidebarModuleInitializer />
       <SessionListPreferenceInitializer />
       <ChatToolsInitializer />
@@ -1277,7 +1315,6 @@ if (isQuickTaskWindow) {
       <AutomationInitializer />
       <PlanningInitializer />
       <ProjectsInitializer />
-      <DiscoverInitializer />
       <FeishuInitializer />
       <DingTalkInitializer />
       <TabStatePersistenceInitializer />
@@ -1286,7 +1323,6 @@ if (isQuickTaskWindow) {
       <GlobalShortcuts />
       <ShortcutGuideDialog />
       <FaqDialog />
-      <FeedbackDialog />
       <TabSwitcher />
       <App />
       <Toaster position="bottom-right" />
