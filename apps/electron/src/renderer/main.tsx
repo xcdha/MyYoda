@@ -68,6 +68,14 @@ import {
   initializeMarkdownFontSize,
 } from './atoms/markdown-font-size'
 import {
+  typographySettingsAtom,
+  initializeTypographySettings,
+} from './atoms/typography-settings'
+import {
+  areaStylesAtom,
+  initializeAreaStyles,
+} from './atoms/area-styles'
+import {
   sidebarModuleCollapsedMapAtom,
   initializeSidebarModuleCollapsed,
 } from './atoms/sidebar-module-atoms'
@@ -76,7 +84,6 @@ import {
   initializeSessionListPreference,
 } from './atoms/session-list-preference-atoms'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
-import { mergeActiveAgentSessions } from './lib/agent-session-list'
 import { useGlobalChatListeners } from './hooks/useGlobalChatListeners'
 import { tabsAtom, activeTabIdAtom, ensureScratchPadTab, getPersistableTabState, scratchPadContentAtom, scratchPadLoadedAtom, SCRATCH_PAD_ID } from './atoms/tab-atoms'
 import type { TabItem } from './atoms/tab-atoms'
@@ -85,7 +92,7 @@ import { dingtalkBotStatesAtom } from './atoms/dingtalk-atoms'
 import { currentConversationIdAtom, channelsAtom, channelsLoadedAtom, selectedModelAtom } from './atoms/chat-atoms'
 import { chatToolsAtom } from './atoms/chat-tool-atoms'
 import { appModeAtom } from './atoms/app-mode'
-import type { AgentSessionMeta, FeishuBotBridgeState, FeishuBridgeState, DingTalkBotBridgeState, DingTalkBridgeState } from '@myyoda/shared'
+import type { FeishuBotBridgeState, FeishuBridgeState, DingTalkBotBridgeState, DingTalkBridgeState } from '@myyoda/shared'
 import { Toaster } from './components/ui/sonner'
 import { toast } from 'sonner'
 import { ArrowUpRight } from 'lucide-react'
@@ -102,11 +109,9 @@ import { diffCapabilities, UPDATER_LINKS } from '@myyoda/shared'
 import type { GitHubRelease, WorkspaceCapabilities } from '@myyoda/shared'
 import { showCapabilityChangeToasts } from './lib/capabilities-toast'
 import { ProjectsInitializer } from './components/ProjectsInitializer'
-import { DiscoverInitializer } from './components/discover/DiscoverInitializer'
 import { GlobalShortcuts } from './components/shortcuts/GlobalShortcuts'
 import { ShortcutGuideDialog } from './components/shortcuts/ShortcutGuideDialog'
 import { FaqDialog } from './components/faq/FaqDialog'
-import { FeedbackDialog } from './components/feedback/FeedbackDialog'
 import { VoiceDictationApp } from './components/voice-dictation/VoiceDictationApp'
 import { TabSwitcher } from './components/tabs/TabSwitcher'
 import { htmlToMarkdown, markdownToHtml } from './lib/markdown-rich-text'
@@ -581,19 +586,12 @@ function AutomationInitializer(): null {
   const setDraftSessionIds = useSetAtom(draftSessionIdsAtom)
   const workspaceScope = useAtomValue(planningWorkspaceScopeAtom)
   const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
-  const store = useStore()
 
   useEffect(() => {
     const load = (): void => {
       window.electronAPI.listAutomations(workspaceScope, currentWorkspaceId ?? undefined).then(setAutomations).catch(console.error)
-      window.electronAPI.listAgentSessions('active').then((sessions) => {
-        // 所有 active scope 刷新统一保留仍被 Tab 引用的归档 metadata（upstream #1627）
-        const openSessionIds = new Set(
-          store.get(tabsAtom)
-            .filter((tab) => tab.type === 'agent' || tab.type === 'preview')
-            .map((tab) => tab.sessionId),
-        )
-        setAgentSessions((prev) => mergeActiveAgentSessions(prev, sessions, openSessionIds))
+      window.electronAPI.listAgentSessions().then((sessions) => {
+        setAgentSessions(sessions)
         // 双向对账 draft 集合（防漂移，自愈历史脏数据）：
         // 1) 补入：真空会话（未发消息、无 SDK 运行痕迹、标题仍为默认）补入 draft；
         // 2) 移除：已真正发过消息 / 已绑定 SDK 运行 / 已重命名的会话从 draft 移除。
@@ -602,7 +600,7 @@ function AutomationInitializer(): null {
         // 路径可能漏掉移除，导致已发消息的会话被持久化 draft 标记永久隐藏（重启也无效）。
         // 此处以索引权威状态为准双向收敛：不用 createdAt !== updatedAt 判定（历史空会话
         // 的 updatedAt 可能被 touch，仅凭时间差会误移出 draft），改用 messageCount/sdkSessionId/
-        // piSessionFile/title 等"确已发消息"信号。
+        // piSessionFile/title 等“确已发消息”信号。
         setDraftSessionIds((prev) => {
           const next = new Set(prev)
           let changed = false
@@ -626,7 +624,7 @@ function AutomationInitializer(): null {
     load()
     const unsub = window.electronAPI.onAutomationChanged(load)
     return unsub
-  }, [setAutomations, setAgentSessions, setDraftSessionIds, workspaceScope, currentWorkspaceId, store])
+  }, [setAutomations, setAgentSessions, setDraftSessionIds, workspaceScope, currentWorkspaceId])
 
   return null
 }
@@ -749,16 +747,46 @@ function UiPreferencesInitializer(): null {
 }
 
 /**
- * Markdown 字号初始化组件
+ * Markdown 字号 / 排版 / 区域样式初始化组件
  *
- * 从主进程加载字号档位，写入 :root CSS 变量驱动 Markdown 预览。
+ * 从主进程加载字号档位、正文排版与按区域字体/颜色设置，
+ * 写入 :root CSS 变量驱动渲染。
  */
 function MarkdownFontSizeInitializer(): null {
   const setMarkdownFontSize = useSetAtom(markdownFontSizeAtom)
+  const setTypography = useSetAtom(typographySettingsAtom)
+  const setAreaStyles = useSetAtom(areaStylesAtom)
 
   useEffect(() => {
     initializeMarkdownFontSize(setMarkdownFontSize)
-  }, [setMarkdownFontSize])
+    initializeTypographySettings(setTypography)
+    initializeAreaStyles(setAreaStyles)
+  }, [setMarkdownFontSize, setTypography, setAreaStyles])
+
+  return null
+}
+
+/**
+ * Ctrl/⌘+滚轮缩放监听组件
+ *
+ * 与浏览器行为一致：按住 Ctrl（Windows/Linux）或 Cmd（macOS）滚动滚轮，
+ * 上滑放大 / 下滑缩小。DOM wheel 事件能取到 deltaY 与 ctrlKey/metaKey，
+ * 通过 electronAPI.zoomByDelta 请求主进程缩放（主进程处理后广播新系数）。
+ * 普通滚动（未按修饰键）不拦截，保持默认滚动行为。
+ */
+function WheelZoomListener(): null {
+  useEffect(() => {
+    const handleWheel = (event: WheelEvent): void => {
+      if (!event.ctrlKey && !event.metaKey) return
+      if (event.altKey) return
+      // 仅在主要窗口区域触发，避免影响内嵌浏览器（WebContentsView 的 wheel
+      // 不会冒泡到主 renderer，此处天然隔离）
+      event.preventDefault()
+      window.electronAPI.zoomByDelta(-event.deltaY)
+    }
+    window.addEventListener('wheel', handleWheel, { passive: false })
+    return () => window.removeEventListener('wheel', handleWheel)
+  }, [])
 
   return null
 }
@@ -981,19 +1009,9 @@ function TabStatePersistenceInitializer(): null {
     Promise.all([
       window.electronAPI.getSettings(),
       window.electronAPI.listConversations(),
-      window.electronAPI.listAgentSessions('active'),
-    ]).then(async ([settings, conversations, activeAgentSessions]) => {
+      window.electronAPI.listAgentSessions(),
+    ]).then(([settings, conversations, agentSessions]) => {
       const tabState = settings.tabState
-      const persistedAgentSessionIds = [...new Set(
-        (tabState?.tabs ?? [])
-          .filter((tab): tab is TabItem => typeof tab === 'object' && tab !== null && 'type' in tab && 'sessionId' in tab && tab.type === 'agent' && typeof tab.sessionId === 'string')
-          .map((tab) => tab.sessionId),
-      )]
-      // 启动恢复只读取持久化 Tab 对应的少量归档 metadata，避免重引入全量归档 IPC。
-      const restoredAgentSessions = (await Promise.all(
-        persistedAgentSessionIds.map((id) => window.electronAPI.getAgentSessionMeta(id)),
-      )).filter((session): session is AgentSessionMeta => session !== undefined)
-      const agentSessions = [...activeAgentSessions, ...restoredAgentSessions.filter((session) => session.archived)]
       if (!tabState?.tabs?.length) {
         restoredRef.current = true
         return
@@ -1041,20 +1059,6 @@ function TabStatePersistenceInitializer(): null {
       const activeTab = validTabs.find((t) => t.id === restoredActiveTabId) ?? validTabs[0] ?? null
       store.set(tabsAtom, ensureScratchPadTab(activeTab ? [activeTab] : []))
       store.set(activeTabIdAtom, restoredActiveTabId)
-
-      // 常规侧栏只持有 active metadata；恢复中的归档 Tab 仍需要会话级
-      // workspace/model/settings，故只合并这些少量已打开会话，不能丢回整份归档列表。
-      const restoredAgentSessionIds = new Set(
-        validTabs.filter((tab) => tab.type === 'agent').map((tab) => tab.sessionId),
-      )
-      if (restoredAgentSessionIds.size > 0) {
-        const restoredAgentSessions = agentSessions.filter((session) => restoredAgentSessionIds.has(session.id))
-        store.set(agentSessionsAtom, (prev) => {
-          const byId = new Map(prev.map((session) => [session.id, session]))
-          for (const session of restoredAgentSessions) byId.set(session.id, session)
-          return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt)
-        })
-      }
 
       // 同步 appMode 和 currentSessionId
       if (activeTab) {
@@ -1253,6 +1257,7 @@ if (isQuickTaskWindow) {
       <React.StrictMode>
         <ThemeInitializer />
         <MarkdownFontSizeInitializer />
+        <WheelZoomListener />
         <DetachedPreviewApp />
         <Toaster position="bottom-right" />
       </React.StrictMode>
@@ -1300,6 +1305,7 @@ if (isQuickTaskWindow) {
       <DockBadgeInitializer />
       <UiPreferencesInitializer />
       <MarkdownFontSizeInitializer />
+      <WheelZoomListener />
       <SidebarModuleInitializer />
       <SessionListPreferenceInitializer />
       <ChatToolsInitializer />
@@ -1309,7 +1315,6 @@ if (isQuickTaskWindow) {
       <AutomationInitializer />
       <PlanningInitializer />
       <ProjectsInitializer />
-      <DiscoverInitializer />
       <FeishuInitializer />
       <DingTalkInitializer />
       <TabStatePersistenceInitializer />
@@ -1318,7 +1323,6 @@ if (isQuickTaskWindow) {
       <GlobalShortcuts />
       <ShortcutGuideDialog />
       <FaqDialog />
-      <FeedbackDialog />
       <TabSwitcher />
       <App />
       <Toaster position="bottom-right" />
