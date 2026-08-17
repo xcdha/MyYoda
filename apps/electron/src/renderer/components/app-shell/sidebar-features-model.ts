@@ -30,7 +30,9 @@ export function isFeatureItemActive(kind: FeatureItemKind, ctx: FeatureViewConte
     case 'planning':
       return ctx.activeView === 'planning'
     case 'board':
-      return ctx.mode === 'agent' && ctx.codeMainView === 'tasks' && ctx.activeView === 'conversations'
+      // 看板由 codeMainView='tasks' 驱动，Chat/Agent 模式均可打开（handleOpenTaskBoard 不切模式），
+      // 激活判定必须与页面渲染一致，不能额外要求 mode==='agent'。
+      return ctx.codeMainView === 'tasks' && ctx.activeView === 'conversations'
     case 'canvas':
       return ctx.activeView === 'excalidraw-gallery' || ctx.activeView === 'excalidraw-editor'
     case 'skills':
@@ -49,6 +51,8 @@ export function anyFeatureActive(ctx: FeatureViewContext): boolean {
 
 /**
  * 该项是否渲染：
+ * - 激活项永远显示（指示模式唯一可见项；Chat 模式下打开了 agentOnly 功能也必须显示，
+ *   否则侧栏显示的文字与实际页面不一致）
  * - 菜单模式（showingAll=true）：可见，但 agentOnly 项在 Chat 模式下仍隐藏
  * - 指示模式（showingAll=false）：仅激活项可见
  */
@@ -58,7 +62,10 @@ export function shouldShowFeatureItem(
   showingAll: boolean,
 ): boolean {
   const item = FEATURE_ITEMS.find((entry) => entry.kind === kind)
-  if (!item || (item.agentOnly && ctx.mode !== 'agent')) return false
+  if (!item) return false
+  const active = isFeatureItemActive(kind, ctx)
+  if (active) return true
+  if (item.agentOnly && ctx.mode !== 'agent') return false
   if (showingAll) return true
-  return isFeatureItemActive(kind, ctx)
+  return false
 }

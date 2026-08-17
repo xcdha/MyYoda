@@ -15,8 +15,8 @@ describe('isFeatureItemActive', () => {
   test('Given 看板视图激活（agent + tasks + conversations）When 判定 board Then true', () => {
     expect(isFeatureItemActive('board', ctx({ codeMainView: 'tasks' }))).toBe(true)
   })
-  test('Given chat 模式 tasks 主视图 When 判定 board Then false（看板仅 agent）', () => {
-    expect(isFeatureItemActive('board', ctx({ mode: 'chat', codeMainView: 'tasks' }))).toBe(false)
+  test('Given chat 模式 tasks 主视图 When 判定 board Then true（看板不依赖 agent 模式，页面已渲染即激活）', () => {
+    expect(isFeatureItemActive('board', ctx({ mode: 'chat', codeMainView: 'tasks' }))).toBe(true)
   })
   test('Given 画布 gallery 激活 When 判定 canvas Then true', () => {
     expect(isFeatureItemActive('canvas', ctx({ activeView: 'excalidraw-gallery' }))).toBe(true)
