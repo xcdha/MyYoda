@@ -32,6 +32,7 @@ import { RepoWikiView } from '@/components/repo-wiki/RepoWikiView'
 import { BotHubSettings } from '@/components/settings/BotHubSettings'
 import { DiscoverView } from '@/components/discover/DiscoverView'
 import { ExcalidrawView } from '@/components/excalidraw/ExcalidrawView'
+import { FullscreenSidebarToggleBar } from '@/components/app-shell/FullscreenSidebarToggleBar'
 import { automationFormAtom } from '@/atoms/automation-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
 import { interfaceVariantAtom } from '@/atoms/theme'
@@ -378,6 +379,9 @@ export function MainArea(): React.ReactElement {
             className={cn('flex flex-col min-w-0 h-full relative', showPreview && 'mr-0.5')}
             style={leftFlexStyle}
           >
+            {/* 全屏视图（Yoda 插件/知识库/发现/画布等）替换 TabBar 后无展开按钮；收起态补一条展开条。
+                对话页（conversations）由 TabBar 自身提供收起态按钮，这里明确排除避免重复。 */}
+            {activeView !== 'conversations' && <FullscreenSidebarToggleBar />}
             {appMode === 'cowork' ? (
               // 遗留 cowork 兜底：AppShell 会迁移到 agent + codeMainView='work'；
               // 保留此分支避免迁移前一帧空白。

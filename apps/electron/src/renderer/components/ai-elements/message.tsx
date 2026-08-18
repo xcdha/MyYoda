@@ -804,7 +804,7 @@ export const UserMessageContent = React.memo(
     }, [])
 
     return (
-      <div className={cn('user-message-bubble relative w-max min-w-[4em] max-w-full whitespace-normal rounded-[12px] bg-secondary/75 px-3.5 py-2.5', className)} {...props}>
+      <div className={cn('user-message-bubble relative w-max max-w-full whitespace-normal rounded-[12px] bg-secondary/75 px-3.5 py-2.5', className)} {...props}>
         <div
           ref={contentRef}
           className={cn(
